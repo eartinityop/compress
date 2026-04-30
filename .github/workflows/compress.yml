@@ -218,7 +218,7 @@ jobs:
           while IFS= read -r line; do
             if [[ "$line" =~ % ]]; then
               percent=$(echo "$line" | grep -oP '\d+(\.\d+)?%' | head -1)
-              num=${percent%\%}
+              num=$(echo "${percent%\%}" | cut -d'.' -f1)
               filled=$((num * 20 / 100))
               bar=$(printf "%0.s█" $(seq 1 $filled))
               empty=$(printf "%0.s░" $(seq 1 $((20 - filled))))
