@@ -101,6 +101,7 @@ jobs:
               app = Client('my_account', api_id=int(os.environ['API_ID']),
                            api_hash=os.environ['API_HASH'])
               await app.start()
+              await app.get_chat(GROUP_CHAT_ID)
               msg = await app.get_messages(GROUP_CHAT_ID, FWD_MSG_ID)
               await msg.download(file_name='original.mp4', progress=progress)
               await app.stop()
