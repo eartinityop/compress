@@ -1,4 +1,4 @@
-name: Video Compressor (Channel Username Method)
+name: Video Compressor (Final – Folder + Speed)
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
         description: 'Message ID of forwarded video in channel'
         required: true
       user_id:
-        description: 'Original user chat ID (for sending progress/compressed video)'
+        description: 'Original user chat ID (for progress & compressed video)'
         required: true
       quality:
         description: 'Target height (240/360/480/720/1080)'
@@ -31,6 +31,9 @@ jobs:
       QUALITY: ${{ github.event.inputs.quality }}
 
     steps:
+      # ------------------------------------------------------------------
+      # 🔧 Setup
+      # ------------------------------------------------------------------
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -39,6 +42,12 @@ jobs:
       - name: Install Python packages
         run: pip install pyrogram tgcrypto requests
 
+      - name: Create output directory
+        run: mkdir -p compress
+
+      # ------------------------------------------------------------------
+      # 🖥 Runner specs
+      # ------------------------------------------------------------------
       - name: Update Telegram with runner specs
         run: |
           CPU=$(lscpu | grep "Model name" | cut -d: -f2 | xargs)
@@ -52,6 +61,9 @@ jobs:
             -d "text=${MESSAGE}" \
             -d "parse_mode=Markdown"
 
+      # ------------------------------------------------------------------
+      # 📥 Download with progress (speed + size)
+      # ------------------------------------------------------------------
       - name: Download video from channel using Pyrogram
         id: download
         env:
@@ -63,14 +75,17 @@ jobs:
         run: |
           echo "$SESSION_B64" | base64 -d > my_account.session
           python -c "
-          import os, asyncio, requests
+          import os, asyncio, requests, time
           from pyrogram import Client
 
           BOT_TOKEN = os.environ['BOT_TOKEN']
           USER_CHAT_ID = os.environ['USER_CHAT_ID']
           MSG_ID = int(os.environ['MSG_ID'])
-          CHANNEL_USERNAME = os.environ['CHANNEL_USERNAME']   # without @
+          CHANNEL_USERNAME = os.environ['CHANNEL_USERNAME']
           FWD_MSG_ID = int(os.environ['FWD_MSG_ID'])
+          OUTPUT_FILE = 'compress/original.mp4'
+
+          state = {'last_bytes': 0, 'last_time': time.time()}
 
           def update_message(text):
               requests.post(f'https://api.telegram.org/bot{BOT_TOKEN}/editMessageText', json={
@@ -81,23 +96,35 @@ jobs:
               })
 
           async def progress(current, total):
+              now = time.time()
+              elapsed = now - state['last_time']
+              if elapsed < 1:  # update max once per second
+                  return
+              speed = (current - state['last_bytes']) / elapsed if elapsed > 0 else 0
+              speed_mb = speed / 1048576
               percent = int(current * 100 / total) if total else 0
+              total_mb = total / 1048576
+              current_mb = current / 1048576
               bar_len = 20
               filled = int(percent * bar_len / 100)
               bar = '█' * filled + '░' * (bar_len - filled)
-              update_message(f'📥 *Downloading...* [{bar}] {percent}%')
+              update_message(
+                  f'📥 *Downloading...* [{bar}] {percent}%\n'
+                  f'({current_mb:.1f} / {total_mb:.1f} MB)  ⚡ {speed_mb:.1f} MB/s'
+              )
+              state['last_time'] = now
+              state['last_bytes'] = current
 
           async def main():
               app = Client('my_account', api_id=int(os.environ['API_ID']),
                            api_hash=os.environ['API_HASH'])
               await app.start()
-              # Resolve channel by username (you are admin, always works)
               channel = await app.get_chat(CHANNEL_USERNAME)
               msg = await app.get_messages(channel.id, FWD_MSG_ID)
               if not msg or not msg.media:
                   update_message('❌ *Video not found in channel.*')
               else:
-                  await msg.download(file_name='original.mp4', progress=progress)
+                  await msg.download(file_name=OUTPUT_FILE, progress=progress)
                   update_message('✅ *Download complete!*')
               await app.stop()
 
@@ -114,31 +141,52 @@ jobs:
             -d "parse_mode=Markdown"
           exit 1
 
+      # ------------------------------------------------------------------
+      # ✅ Verify downloaded file
+      # ------------------------------------------------------------------
+      - name: Verify downloaded file exists
+        id: verify
+        run: |
+          if [ ! -f compress/original.mp4 ]; then
+            curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+              -d "chat_id=${USER_CHAT_ID}" \
+              -d "message_id=${MSG_ID}" \
+              -d "text=❌ *Verification failed: original.mp4 not found.*" \
+              -d "parse_mode=Markdown"
+            exit 1
+          else
+            SIZE=$(du -sh compress/original.mp4 | cut -f1)
+            curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+              -d "chat_id=${USER_CHAT_ID}" \
+              -d "message_id=${MSG_ID}" \
+              -d "text=✅ *File verified* (${SIZE})" \
+              -d "parse_mode=Markdown"
+          fi
+
+      - name: Handle verification failure
+        if: failure() && steps.verify.outcome == 'failure'
+        run: exit 1
+
+      # ------------------------------------------------------------------
+      # 🎞 Compression
+      # ------------------------------------------------------------------
       - name: Compress video
         id: compress
         run: |
-          # PROBE OUT THE DOWNLOADED FILE
-          PROBE_OUT=$(ffprobe -v quiet -print_format json -show_format -show_streams original.mp4 2>&1 || true)
-          echo "File probe: $PROBE_OUT"
-          
-          # UPDATE MESSAGE
           curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
             -d "chat_id=${USER_CHAT_ID}" \
             -d "message_id=${MSG_ID}" \
             -d "text=🎞 *Compressing to ${QUALITY}p...*" \
             -d "parse_mode=Markdown"
 
-          # RUN FFMPEG WITH ERROR LOG
-          if ffmpeg -y -i original.mp4 -vf "scale=-2:${QUALITY}" -c:v libx264 -preset fast -crf 23 -c:a aac -b:a 128k compressed.mp4 2>/tmp/ffmpeg.log; then
+          if ffmpeg -y -i compress/original.mp4 -vf "scale=-2:${QUALITY}" -c:v libx264 -preset fast -crf 23 -c:a aac -b:a 128k compress/compressed.mp4 2>/tmp/ffmpeg.log; then
             curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
               -d "chat_id=${USER_CHAT_ID}" \
               -d "message_id=${MSG_ID}" \
               -d "text=✅ *Compressed successfully!*" \
               -d "parse_mode=Markdown"
           else
-            # SHOW THE ERROR LOG
-            FFLOG=$(tail -n 20 /tmp/ffmpeg.log 2>/dev/null || echo "Could not read ffmpeg log")
-            # SPECIAL CHARACTERS
+            FFLOG=$(tail -n 30 /tmp/ffmpeg.log 2>/dev/null || echo "Could not read log")
             ESCAPED_LOG=$(echo "$FFLOG" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))")
             curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
               -d "chat_id=${USER_CHAT_ID}" \
@@ -158,10 +206,13 @@ jobs:
             -d "parse_mode=Markdown"
           exit 1
 
+      # ------------------------------------------------------------------
+      # 📤 Upload compressed video with progress
+      # ------------------------------------------------------------------
       - name: Upload compressed video with progress
         id: upload
         run: |
-          curl -# -F "video=@compressed.mp4" \
+          curl -# -F "video=@compress/compressed.mp4" \
                -F "caption=Here is your compressed video (${QUALITY}p)" \
                "https://api.telegram.org/bot${BOT_TOKEN}/sendVideo" 2>&1 | \
           while IFS= read -r line; do
