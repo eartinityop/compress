@@ -1,4 +1,4 @@
-name: Video Compressor (Final – Document Upload + Progress)
+name: Video Compressor (Final – Document Upload + Reply)
 
 on:
   workflow_dispatch:
@@ -17,6 +17,9 @@ on:
         required: true
       message_id:
         description: 'Progress message ID to update'
+        required: true
+      original_message_id:
+        description: 'Original video message ID (for reply)'
         required: true
 
 jobs:
@@ -177,11 +180,12 @@ jobs:
             -d "text=❌ *Compression failed. Process stopped.*" -d "parse_mode=Markdown"
           exit 1
 
-      # ────────── Upload as document with progress, size, speed, and time caption ──────────
-      - name: Upload compressed file as document (progress + time)
+      # ────────── Upload as document (reply + progress + time) ──────────
+      - name: Upload compressed file as document (reply to original)
         id: upload
         env:
           COMPRESS_START: ${{ env.COMPRESS_START }}
+          ORIGINAL_MSG_ID: ${{ github.event.inputs.original_message_id }}
         run: |
           python -c "
           import os, time, requests, sys
@@ -191,6 +195,7 @@ jobs:
           MSG_ID = int(os.environ['MSG_ID'])
           QUALITY = os.environ['QUALITY']
           COMPRESS_START = int(os.environ['COMPRESS_START'])
+          ORIGINAL_MSG_ID = int(os.environ['ORIGINAL_MSG_ID'])
           FILE_PATH = 'compress/compressed.mp4'
 
           if not os.path.exists(FILE_PATH):
@@ -257,12 +262,16 @@ jobs:
               files = {'document': (os.path.basename(FILE_PATH), pf)}
               resp = requests.post(
                   f'https://api.telegram.org/bot{BOT_TOKEN}/sendDocument',
-                  data={'chat_id': CHAT_ID, 'caption': caption},
+                  data={
+                      'chat_id': CHAT_ID,
+                      'caption': caption,
+                      'reply_to_message_id': ORIGINAL_MSG_ID      # <-- reply to original video
+                  },
                   files=files
               )
 
           if resp.status_code == 200 and resp.json().get('ok'):
-              # Delete the progress message so the chat looks clean
+              # Delete the progress message so only the final document remains
               requests.post(f'https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage', json={
                   'chat_id': CHAT_ID, 'message_id': MSG_ID
               })
