@@ -117,17 +117,36 @@ jobs:
       - name: Compress video
         id: compress
         run: |
+          # PROBE OUT THE DOWNLOADED FILE
+          PROBE_OUT=$(ffprobe -v quiet -print_format json -show_format -show_streams original.mp4 2>&1 || true)
+          echo "File probe: $PROBE_OUT"
+          
+          # UPDATE MESSAGE
           curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
             -d "chat_id=${USER_CHAT_ID}" \
             -d "message_id=${MSG_ID}" \
             -d "text=🎞 *Compressing to ${QUALITY}p...*" \
             -d "parse_mode=Markdown"
-          ffmpeg -y -i original.mp4 -vf "scale=-2:${QUALITY}" -c:v libx264 -preset fast -crf 23 -c:a aac -b:a 128k compressed.mp4 2>/tmp/ffmpeg.log
-          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
-            -d "chat_id=${USER_CHAT_ID}" \
-            -d "message_id=${MSG_ID}" \
-            -d "text=✅ *Compressed successfully!*" \
-            -d "parse_mode=Markdown"
+
+          # RUN FFMPEG WITH ERROR LOG
+          if ffmpeg -y -i original.mp4 -vf "scale=-2:${QUALITY}" -c:v libx264 -preset fast -crf 23 -c:a aac -b:a 128k compressed.mp4 2>/tmp/ffmpeg.log; then
+            curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+              -d "chat_id=${USER_CHAT_ID}" \
+              -d "message_id=${MSG_ID}" \
+              -d "text=✅ *Compressed successfully!*" \
+              -d "parse_mode=Markdown"
+          else
+            # SHOW THE ERROR LOG
+            FFLOG=$(tail -n 20 /tmp/ffmpeg.log 2>/dev/null || echo "Could not read ffmpeg log")
+            # SPECIAL CHARACTERS
+            ESCAPED_LOG=$(echo "$FFLOG" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))")
+            curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+              -d "chat_id=${USER_CHAT_ID}" \
+              -d "message_id=${MSG_ID}" \
+              -d "text=❌ *Compression failed!* Error log:\n\`\`\`${ESCAPED_LOG}\`\`\`" \
+              -d "parse_mode=Markdown"
+            exit 1
+          fi
 
       - name: Handle compression failure
         if: failure()
