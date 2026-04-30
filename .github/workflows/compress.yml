@@ -1,10 +1,10 @@
-name: Video Compressor (Channel Method)
+name: Video Compressor (Channel Username Method)
 
 on:
   workflow_dispatch:
     inputs:
       channel_username:
-        description: 'Channel username (where video was forwarded)'
+        description: 'Username of the private channel (without @)'
         required: true
       fwd_message_id:
         description: 'Message ID of forwarded video in channel'
@@ -69,7 +69,7 @@ jobs:
           BOT_TOKEN = os.environ['BOT_TOKEN']
           USER_CHAT_ID = os.environ['USER_CHAT_ID']
           MSG_ID = int(os.environ['MSG_ID'])
-          CHANNEL_USERNAME = int(os.environ['CHANNEL_USERNAME'])
+          CHANNEL_USERNAME = os.environ['CHANNEL_USERNAME']   # without @
           FWD_MSG_ID = int(os.environ['FWD_MSG_ID'])
 
           def update_message(text):
@@ -91,14 +91,14 @@ jobs:
               app = Client('my_account', api_id=int(os.environ['API_ID']),
                            api_hash=os.environ['API_HASH'])
               await app.start()
-              # Force access to channel (you are admin, always succeeds)
-              chat = await app.get_chat(CHANNEL_USERNAME)
-              msg = await app.get_messages(chat.id, FWD_MSG_ID)
-              if msg and (msg.video or msg.document):
+              # Resolve channel by username (you are admin, always works)
+              channel = await app.get_chat(CHANNEL_USERNAME)
+              msg = await app.get_messages(channel.id, FWD_MSG_ID)
+              if not msg or not msg.media:
+                  update_message('❌ *Video not found in channel.*')
+              else:
                   await msg.download(file_name='original.mp4', progress=progress)
                   update_message('✅ *Download complete!*')
-              else:  
-                  update_message('❌ *Video not found in channel.*')
               await app.stop()
 
           asyncio.run(main())
