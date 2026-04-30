@@ -1,16 +1,16 @@
-name: Video Compressor (Username Method)
+name: Video Compressor (Channel Method)
 
 on:
   workflow_dispatch:
     inputs:
-      original_message_id:
-        description: 'Message ID of the video in user chat'
+      channel_id:
+        description: 'Private channel ID (where video was forwarded)'
         required: true
-      bot_username:
-        description: 'Bot username (without @)'
+      fwd_message_id:
+        description: 'Message ID of forwarded video in channel'
         required: true
       user_id:
-        description: 'User ID (the user who sent the video)'
+        description: 'Original user chat ID (for sending progress/compressed video)'
         required: true
       quality:
         description: 'Target height (240/360/480/720/1080)'
@@ -26,7 +26,7 @@ jobs:
 
     env:
       BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      USER_CHAT_ID: ${{ github.event.inputs.user_id }}   # for progress updates
+      USER_CHAT_ID: ${{ github.event.inputs.user_id }}
       MSG_ID: ${{ github.event.inputs.message_id }}
       QUALITY: ${{ github.event.inputs.quality }}
 
@@ -52,15 +52,14 @@ jobs:
             -d "text=${MESSAGE}" \
             -d "parse_mode=Markdown"
 
-      - name: Download video using Pyrogram (via bot username)
+      - name: Download video from channel using Pyrogram
         id: download
         env:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
           SESSION_B64: ${{ secrets.USER_SESSION_BASE64 }}
-          BOT_USERNAME: ${{ github.event.inputs.bot_username }}
-          USER_ID: ${{ github.event.inputs.user_id }}
-          ORIGINAL_MSG_ID: ${{ github.event.inputs.original_message_id }}
+          CHANNEL_ID: ${{ github.event.inputs.channel_id }}
+          FWD_MSG_ID: ${{ github.event.inputs.fwd_message_id }}
         run: |
           echo "$SESSION_B64" | base64 -d > my_account.session
           python -c "
@@ -68,10 +67,10 @@ jobs:
           from pyrogram import Client
 
           BOT_TOKEN = os.environ['BOT_TOKEN']
-          USER_CHAT_ID = os.environ['USER_ID']
+          USER_CHAT_ID = os.environ['USER_CHAT_ID']
           MSG_ID = int(os.environ['MSG_ID'])
-          BOT_USERNAME = os.environ['BOT_USERNAME']
-          ORIGINAL_MSG_ID = int(os.environ['ORIGINAL_MSG_ID'])
+          CHANNEL_ID = int(os.environ['CHANNEL_ID'])
+          FWD_MSG_ID = int(os.environ['FWD_MSG_ID'])
 
           def update_message(text):
               requests.post(f'https://api.telegram.org/bot{BOT_TOKEN}/editMessageText', json={
@@ -92,12 +91,15 @@ jobs:
               app = Client('my_account', api_id=int(os.environ['API_ID']),
                            api_hash=os.environ['API_HASH'])
               await app.start()
-              # Resolve bot by username (always works if you've chatted with that bot)
-              bot_chat = await app.get_chat(BOT_USERNAME)
-              msg = await app.get_messages(bot_chat.id, ORIGINAL_MSG_ID)
-              await msg.download(file_name='original.mp4', progress=progress)
+              # Force access to channel (you are admin, always succeeds)
+              chat = await app.get_chat(CHANNEL_ID)
+              msg = await app.get_messages(chat.id, FWD_MSG_ID)
+              if not msg or not msg.media:
+                  update_message('❌ *Video not found in channel.*')
+              else:
+                  await msg.download(file_name='original.mp4', progress=progress)
+                  update_message('✅ *Download complete!*')
               await app.stop()
-              update_message('✅ *Download complete!*')
 
           asyncio.run(main())
           "
@@ -120,9 +122,7 @@ jobs:
             -d "message_id=${MSG_ID}" \
             -d "text=🎞 *Compressing to ${QUALITY}p...*" \
             -d "parse_mode=Markdown"
-
           ffmpeg -y -i original.mp4 -vf "scale=-2:${QUALITY}" -c:v libx264 -preset fast -crf 23 -c:a aac -b:a 128k compressed.mp4 2>/tmp/ffmpeg.log
-
           curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
             -d "chat_id=${USER_CHAT_ID}" \
             -d "message_id=${MSG_ID}" \
