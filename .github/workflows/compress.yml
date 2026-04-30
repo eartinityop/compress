@@ -1,4 +1,4 @@
-name: Video Compressor (Pyrogram Upload – No Size Limit)
+name: Video Compressor (Pyrogram Upload – Fixed)
 
 on:
   workflow_dispatch:
@@ -239,11 +239,9 @@ jobs:
                       reply_to_message_id=ORIGINAL_MSG_ID
                   )
                   # Delete the progress message (success)
-                  await app.invoke(
-                      app.handler.delete_messages(
-                          chat_id=int(USER_CHAT_ID),
-                          message_ids=[MSG_ID]
-                      )
+                  await app.delete_messages(
+                      chat_id=int(USER_CHAT_ID),
+                      message_ids=MSG_ID
                   )
               except Exception as e:
                   update_message(f'❌ *Upload failed:* {str(e)[:200]}')
