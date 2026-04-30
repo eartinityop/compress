@@ -1,22 +1,19 @@
-name: Video Compressor with MTProto Download (Session File)
+name: Video Compressor (Direct Download)
 
 on:
   workflow_dispatch:
     inputs:
-      fwd_message_id:
-        description: 'Forwarded message ID in group'
+      original_message_id:
+        description: 'Message ID of the video in user chat'
         required: true
-      group_chat_id:
-        description: 'Private group chat ID'
-        required: true
-      user_chat_id:
-        description: 'Original user chat ID'
+      user_id:
+        description: 'User ID (the user who sent the video)'
         required: true
       quality:
         description: 'Target height (240/360/480/720/1080)'
         required: true
       message_id:
-        description: 'Message ID to update progress'
+        description: 'Progress message ID to update'
         required: true
 
 jobs:
@@ -26,14 +23,11 @@ jobs:
 
     env:
       BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      USER_CHAT_ID: ${{ github.event.inputs.user_chat_id }}
+      USER_CHAT_ID: ${{ github.event.inputs.user_id }}
       MSG_ID: ${{ github.event.inputs.message_id }}
       QUALITY: ${{ github.event.inputs.quality }}
 
     steps:
-      # ------------------------------------------------------------------
-      # 🔧 Setup
-      # ------------------------------------------------------------------
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -42,9 +36,6 @@ jobs:
       - name: Install Python packages
         run: pip install pyrogram tgcrypto requests
 
-      # ------------------------------------------------------------------
-      # 🖥 Runner specs
-      # ------------------------------------------------------------------
       - name: Update Telegram with runner specs
         run: |
           CPU=$(lscpu | grep "Model name" | cut -d: -f2 | xargs)
@@ -58,19 +49,15 @@ jobs:
             -d "text=${MESSAGE}" \
             -d "parse_mode=Markdown"
 
-      # ------------------------------------------------------------------
-      # 📥 Download via Pyrogram (Session File – no size limit)
-      # ------------------------------------------------------------------
-      - name: Download video using Pyrogram (session file)
+      - name: Download video using Pyrogram (from user's chat)
         id: download
         env:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
           SESSION_B64: ${{ secrets.USER_SESSION_BASE64 }}
-          FWD_MSG_ID: ${{ github.event.inputs.fwd_message_id }}
-          GROUP_CHAT_ID: ${{ github.event.inputs.group_chat_id }}
+          USER_ID: ${{ github.event.inputs.user_id }}
+          ORIGINAL_MSG_ID: ${{ github.event.inputs.original_message_id }}
         run: |
-          # Decode the base64 session file
           echo "$SESSION_B64" | base64 -d > my_account.session
           python -c "
           import os, asyncio, requests
@@ -79,8 +66,8 @@ jobs:
           BOT_TOKEN = os.environ['BOT_TOKEN']
           USER_CHAT_ID = os.environ['USER_CHAT_ID']
           MSG_ID = int(os.environ['MSG_ID'])
-          GROUP_CHAT_ID = int(os.environ['GROUP_CHAT_ID'])
-          FWD_MSG_ID = int(os.environ['FWD_MSG_ID'])
+          USER_ID = int(os.environ['USER_ID'])
+          ORIGINAL_MSG_ID = int(os.environ['ORIGINAL_MSG_ID'])
 
           def update_message(text):
               requests.post(f'https://api.telegram.org/bot{BOT_TOKEN}/editMessageText', json={
@@ -101,8 +88,8 @@ jobs:
               app = Client('my_account', api_id=int(os.environ['API_ID']),
                            api_hash=os.environ['API_HASH'])
               await app.start()
-              await app.get_chat(GROUP_CHAT_ID)
-              msg = await app.get_messages(GROUP_CHAT_ID, FWD_MSG_ID)
+              # Fetch the video message directly from the user's private chat with the bot
+              msg = await app.get_messages(USER_ID, ORIGINAL_MSG_ID)
               await msg.download(file_name='original.mp4', progress=progress)
               await app.stop()
               update_message('✅ *Download complete!*')
@@ -110,7 +97,6 @@ jobs:
           asyncio.run(main())
           "
 
-      # ⛔ Download failure handler
       - name: Handle download failure
         if: failure()
         run: |
@@ -121,9 +107,6 @@ jobs:
             -d "parse_mode=Markdown"
           exit 1
 
-      # ------------------------------------------------------------------
-      # 🎞 Compression
-      # ------------------------------------------------------------------
       - name: Compress video
         id: compress
         run: |
@@ -141,7 +124,6 @@ jobs:
             -d "text=✅ *Compressed successfully!*" \
             -d "parse_mode=Markdown"
 
-      # ⛔ Compression failure handler
       - name: Handle compression failure
         if: failure()
         run: |
@@ -152,9 +134,6 @@ jobs:
             -d "parse_mode=Markdown"
           exit 1
 
-      # ------------------------------------------------------------------
-      # 📤 Upload compressed video
-      # ------------------------------------------------------------------
       - name: Upload compressed video with progress
         id: upload
         run: |
@@ -183,7 +162,6 @@ jobs:
             -d "text=🎉 *Video sent successfully!*" \
             -d "parse_mode=Markdown"
 
-      # ⛔ Upload failure handler
       - name: Handle upload failure
         if: failure()
         run: |
@@ -194,9 +172,6 @@ jobs:
             -d "parse_mode=Markdown"
           exit 1
 
-      # ------------------------------------------------------------------
-      # 🏁 Final success (all steps passed)
-      # ------------------------------------------------------------------
       - name: Final completion message
         if: success()
         run: |
