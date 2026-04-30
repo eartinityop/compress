@@ -1,4 +1,4 @@
-name: Video Compressor with MTProto Download
+name: Video Compressor with MTProto Download (Session File)
 
 on:
   workflow_dispatch:
@@ -24,7 +24,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
 
-    # Environment variables reused by many steps
     env:
       BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       USER_CHAT_ID: ${{ github.event.inputs.user_chat_id }}
@@ -44,7 +43,7 @@ jobs:
         run: pip install pyrogram tgcrypto requests
 
       # ------------------------------------------------------------------
-      # 🖥 Show runner specs
+      # 🖥 Runner specs
       # ------------------------------------------------------------------
       - name: Update Telegram with runner specs
         run: |
@@ -60,19 +59,21 @@ jobs:
             -d "parse_mode=Markdown"
 
       # ------------------------------------------------------------------
-      # 📥 Download via Pyrogram (MTProto) – unlimited size
+      # 📥 Download via Pyrogram (Session File – no size limit)
       # ------------------------------------------------------------------
-      - name: Download video using Pyrogram (MTProto)
+      - name: Download video using Pyrogram (session file)
         id: download
         env:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
-          SESSION_STRING: ${{ secrets.USER_SESSION_STRING }}
+          SESSION_B64: ${{ secrets.USER_SESSION_BASE64 }}
           FWD_MSG_ID: ${{ github.event.inputs.fwd_message_id }}
           GROUP_CHAT_ID: ${{ github.event.inputs.group_chat_id }}
         run: |
+          # Decode the base64 session file
+          echo "$SESSION_B64" | base64 -d > my_account.session
           python -c "
-          import os, time, requests, asyncio
+          import os, asyncio, requests
           from pyrogram import Client
 
           BOT_TOKEN = os.environ['BOT_TOKEN']
@@ -97,9 +98,8 @@ jobs:
               update_message(f'📥 *Downloading...* [{bar}] {percent}%')
 
           async def main():
-              app = Client('session', api_id=int(os.environ['API_ID']),
-                           api_hash=os.environ['API_HASH'],
-                           session_string=os.environ['SESSION_STRING'])
+              app = Client('my_account', api_id=int(os.environ['API_ID']),
+                           api_hash=os.environ['API_HASH'])
               await app.start()
               msg = await app.get_messages(GROUP_CHAT_ID, FWD_MSG_ID)
               await msg.download(file_name='original.mp4', progress=progress)
@@ -109,7 +109,7 @@ jobs:
           asyncio.run(main())
           "
 
-      # ⛔ If download fails – update message and stop
+      # ⛔ Download failure handler
       - name: Handle download failure
         if: failure()
         run: |
@@ -121,12 +121,11 @@ jobs:
           exit 1
 
       # ------------------------------------------------------------------
-      # 🎞 Compress with FFmpeg
+      # 🎞 Compression
       # ------------------------------------------------------------------
       - name: Compress video
         id: compress
         run: |
-          # Status update: compressing
           curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
             -d "chat_id=${USER_CHAT_ID}" \
             -d "message_id=${MSG_ID}" \
@@ -135,14 +134,13 @@ jobs:
 
           ffmpeg -y -i original.mp4 -vf "scale=-2:${QUALITY}" -c:v libx264 -preset fast -crf 23 -c:a aac -b:a 128k compressed.mp4 2>/tmp/ffmpeg.log
 
-          # Compression finished
           curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
             -d "chat_id=${USER_CHAT_ID}" \
             -d "message_id=${MSG_ID}" \
             -d "text=✅ *Compressed successfully!*" \
             -d "parse_mode=Markdown"
 
-      # ⛔ If compression fails – update message and stop
+      # ⛔ Compression failure handler
       - name: Handle compression failure
         if: failure()
         run: |
@@ -154,12 +152,11 @@ jobs:
           exit 1
 
       # ------------------------------------------------------------------
-      # 📤 Upload compressed video back to user
+      # 📤 Upload compressed video
       # ------------------------------------------------------------------
       - name: Upload compressed video with progress
         id: upload
         run: |
-          # Upload with progress parsing
           curl -# -F "video=@compressed.mp4" \
                -F "caption=Here is your compressed video (${QUALITY}p)" \
                "https://api.telegram.org/bot${BOT_TOKEN}/sendVideo" 2>&1 | \
@@ -170,7 +167,6 @@ jobs:
               filled=$((num * 20 / 100))
               bar=$(printf "%0.s█" $(seq 1 $filled))
               empty=$(printf "%0.s░" $(seq 1 $((20 - filled))))
-              # Update every 5% to avoid rate limits
               if (( num % 5 == 0 )); then
                 curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
                   -d "chat_id=${USER_CHAT_ID}" \
@@ -180,14 +176,13 @@ jobs:
               fi
             fi
           done
-          # Final success
           curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
             -d "chat_id=${USER_CHAT_ID}" \
             -d "message_id=${MSG_ID}" \
             -d "text=🎉 *Video sent successfully!*" \
             -d "parse_mode=Markdown"
 
-      # ⛔ If upload fails – update message and stop
+      # ⛔ Upload failure handler
       - name: Handle upload failure
         if: failure()
         run: |
@@ -199,13 +194,11 @@ jobs:
           exit 1
 
       # ------------------------------------------------------------------
-      # 🎯 Final step – job completed (only if all above succeeded)
+      # 🏁 Final success (all steps passed)
       # ------------------------------------------------------------------
       - name: Final completion message
         if: success()
         run: |
-          # Already updated by upload step, but we can send an extra line if desired.
-          # This just ensures the user sees a final "Job finished" status.
           curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
             -d "chat_id=${USER_CHAT_ID}" \
             -d "message_id=${MSG_ID}" \
