@@ -1,229 +1,213 @@
-name: Video Compressor with Real-time Progress
+name: Video Compressor with MTProto Download
 
 on:
   workflow_dispatch:
     inputs:
-      file_id:
-        description: 'Telegram file_id'
+      fwd_message_id:
+        description: 'Forwarded message ID in group'
         required: true
-      chat_id:
-        description: 'Chat ID'
+      group_chat_id:
+        description: 'Private group chat ID'
+        required: true
+      user_chat_id:
+        description: 'Original user chat ID'
         required: true
       quality:
-        description: 'Target height (e.g. 720)'
+        description: 'Target height (240/360/480/720/1080)'
         required: true
       message_id:
-        description: 'Message ID to update'
+        description: 'Message ID to update progress'
         required: true
 
 jobs:
   compress:
     runs-on: ubuntu-latest
-    timeout-minutes: 180   # 3 hours, adjust if needed
+    timeout-minutes: 180
+
+    # Environment variables reused by many steps
+    env:
+      BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      USER_CHAT_ID: ${{ github.event.inputs.user_chat_id }}
+      MSG_ID: ${{ github.event.inputs.message_id }}
+      QUALITY: ${{ github.event.inputs.quality }}
 
     steps:
-      - name: Install dependencies
+      # ------------------------------------------------------------------
+      # 🔧 Setup
+      # ------------------------------------------------------------------
+      - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg jq bc
+          sudo apt-get install -y ffmpeg jq bc python3-pip
 
-      # ---------- UPDATE RUNNER SPECS ----------
-      - name: Update Telegram message with runner specs
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          CHAT_ID: ${{ github.event.inputs.chat_id }}
-          MSG_ID: ${{ github.event.inputs.message_id }}
+      - name: Install Python packages
+        run: pip install pyrogram tgcrypto requests
+
+      # ------------------------------------------------------------------
+      # 🖥 Show runner specs
+      # ------------------------------------------------------------------
+      - name: Update Telegram with runner specs
         run: |
           CPU=$(lscpu | grep "Model name" | cut -d: -f2 | xargs)
           RAM=$(free -h | awk '/Mem:/ {print $2}')
           DISK=$(df -h / | awk 'NR==2 {print $2}')
           OS=$(cat /etc/os-release | grep PRETTY_NAME | cut -d'"' -f2)
-          MESSAGE="🖥 *Runner Specs:*
-          • OS: ${OS}
-          • CPU: ${CPU}
-          • RAM: ${RAM}
-          • Storage: ${DISK}"
-
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/editMessageText" \
-            -d "chat_id=${CHAT_ID}" \
+          MESSAGE="🖥 *Runner Specs:*\n• OS: ${OS}\n• CPU: ${CPU}\n• RAM: ${RAM}\n• Storage: ${DISK}"
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+            -d "chat_id=${USER_CHAT_ID}" \
             -d "message_id=${MSG_ID}" \
             -d "text=${MESSAGE}" \
             -d "parse_mode=Markdown"
 
-      # ---------- GET FILE PATH ----------
-      - name: Get Telegram file download URL
-        id: getfile
+      # ------------------------------------------------------------------
+      # 📥 Download via Pyrogram (MTProto) – unlimited size
+      # ------------------------------------------------------------------
+      - name: Download video using Pyrogram (MTProto)
+        id: download
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
+          SESSION_STRING: ${{ secrets.USER_SESSION_STRING }}
+          FWD_MSG_ID: ${{ github.event.inputs.fwd_message_id }}
+          GROUP_CHAT_ID: ${{ github.event.inputs.group_chat_id }}
         run: |
-          FILE_INFO=$(curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getFile?file_id=${{ github.event.inputs.file_id }}")
-          FILE_PATH=$(echo $FILE_INFO | jq -r '.result.file_path')
-          echo "file_path=${FILE_PATH}" >> $GITHUB_OUTPUT
+          python -c "
+          import os, time, requests, asyncio
+          from pyrogram import Client
 
-      # ---------- DOWNLOAD WITH PROGRESS ----------
-      - name: Download original video with progress updates
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          CHAT_ID: ${{ github.event.inputs.chat_id }}
-          MSG_ID: ${{ github.event.inputs.message_id }}
-          FILE_PATH: ${{ steps.getfile.outputs.file_path }}
+          BOT_TOKEN = os.environ['BOT_TOKEN']
+          USER_CHAT_ID = os.environ['USER_CHAT_ID']
+          MSG_ID = int(os.environ['MSG_ID'])
+          GROUP_CHAT_ID = int(os.environ['GROUP_CHAT_ID'])
+          FWD_MSG_ID = int(os.environ['FWD_MSG_ID'])
+
+          def update_message(text):
+              requests.post(f'https://api.telegram.org/bot{BOT_TOKEN}/editMessageText', json={
+                  'chat_id': USER_CHAT_ID,
+                  'message_id': MSG_ID,
+                  'text': text,
+                  'parse_mode': 'Markdown'
+              })
+
+          async def progress(current, total):
+              percent = int(current * 100 / total) if total else 0
+              bar_len = 20
+              filled = int(percent * bar_len / 100)
+              bar = '█' * filled + '░' * (bar_len - filled)
+              update_message(f'📥 *Downloading...* [{bar}] {percent}%')
+
+          async def main():
+              app = Client('session', api_id=int(os.environ['API_ID']),
+                           api_hash=os.environ['API_HASH'],
+                           session_string=os.environ['SESSION_STRING'])
+              await app.start()
+              msg = await app.get_messages(GROUP_CHAT_ID, FWD_MSG_ID)
+              await msg.download(file_name='original.mp4', progress=progress)
+              await app.stop()
+              update_message('✅ *Download complete!*')
+
+          asyncio.run(main())
+          "
+
+      # ⛔ If download fails – update message and stop
+      - name: Handle download failure
+        if: failure()
         run: |
-          set -euo pipefail
-          URL="https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${FILE_PATH}"
-          OUT="original.mp4"
-
-          # Start download in background, writing stderr to a file
-          curl -# -L -o "${OUT}" "${URL}" 2> /tmp/progress.txt &
-          CURL_PID=$!
-
-          LAST_SIZE=0
-          LAST_TIME=$(date +%s)
-          while kill -0 $CURL_PID 2>/dev/null; do
-            sleep 2
-            if [ -f /tmp/progress.txt ]; then
-              # Extract the last line which contains the progress bar
-              LINE=$(tail -n 1 /tmp/progress.txt | tr '\r' '\n' | tail -n 1)
-              # Typical curl progress: "########                         25.0%"
-              PERCENT=$(echo "$LINE" | grep -oP '\d+(\.\d+)?%' | head -1 | tr -d '%')
-              # Download size (e.g., "156M")
-              DL_SIZE=$(echo "$LINE" | grep -oP '\d+(\.\d+)?[KMGT]' | tail -1 || echo "")
-              if [ -z "$PERCENT" ]; then
-                PERCENT=0
-              fi
-              # Calculate speed
-              CURRENT_SIZE=$(stat -c%s "${OUT}" 2>/dev/null || echo 0)
-              NOW=$(date +%s)
-              ELAPSED=$(( NOW - LAST_TIME ))
-              if [ $ELAPSED -gt 0 ]; then
-                SPEED_BYTES=$(( (CURRENT_SIZE - LAST_SIZE) / ELAPSED ))
-                SPEED_MB=$(echo "scale=2; ${SPEED_BYTES}/1048576" | bc)
-              else
-                SPEED_MB=0
-              fi
-              LAST_SIZE=${CURRENT_SIZE}
-              LAST_TIME=${NOW}
-              # Build progress bar (20 chars)
-              BARS=20
-              FILLED=$(echo "scale=0; ${PERCENT}/5" | bc)  # 20 chars = 5% each
-              EMPTY=$(( BARS - FILLED ))
-              BAR=$(printf "%0.s█" $(seq 1 $FILLED))
-              BAR+=$(printf "%0.s░" $(seq 1 $EMPTY))
-              # Edit message
-              MESSAGE="📥 *Downloading...* [${BAR}] ${PERCENT}%\n⚡ Speed: ${SPEED_MB} MB/s"
-              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/editMessageText" \
-                -d "chat_id=${CHAT_ID}" \
-                -d "message_id=${MSG_ID}" \
-                -d "text=${MESSAGE}" \
-                -d "parse_mode=Markdown" > /dev/null
-            fi
-          done
-          wait $CURL_PID
-          # Final download complete message
-          MESSAGE="✅ *Download complete!*"
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/editMessageText" \
-            -d "chat_id=${CHAT_ID}" \
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+            -d "chat_id=${USER_CHAT_ID}" \
             -d "message_id=${MSG_ID}" \
-            -d "text=${MESSAGE}" \
+            -d "text=❌ *Download failed. Process stopped.*" \
             -d "parse_mode=Markdown"
+          exit 1
 
-      # ---------- COMPRESS WITH LIVE SPEED ----------
-      - name: Compress video with ffmpeg (live speed)
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          CHAT_ID: ${{ github.event.inputs.chat_id }}
-          MSG_ID: ${{ github.event.inputs.message_id }}
-          QUALITY: ${{ github.event.inputs.quality }}
+      # ------------------------------------------------------------------
+      # 🎞 Compress with FFmpeg
+      # ------------------------------------------------------------------
+      - name: Compress video
+        id: compress
         run: |
-          # Update message to "Compressing..."
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/editMessageText" \
-            -d "chat_id=${CHAT_ID}" \
+          # Status update: compressing
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+            -d "chat_id=${USER_CHAT_ID}" \
             -d "message_id=${MSG_ID}" \
             -d "text=🎞 *Compressing to ${QUALITY}p...*" \
             -d "parse_mode=Markdown"
 
-          # Start ffmpeg, capturing stderr which contains progress
-          ffmpeg -y -i original.mp4 -vf "scale=-2:${QUALITY}" -c:v libx264 -preset fast -crf 23 -c:a aac -b:a 128k compressed.mp4 2> /tmp/ffmpeg.log &
-          FFMPEG_PID=$!
+          ffmpeg -y -i original.mp4 -vf "scale=-2:${QUALITY}" -c:v libx264 -preset fast -crf 23 -c:a aac -b:a 128k compressed.mp4 2>/tmp/ffmpeg.log
 
-          # Periodically parse speed from log and update
-          while kill -0 $FFMPEG_PID 2>/dev/null; do
-            sleep 3
-            if [ -f /tmp/ffmpeg.log ]; then
-              # Extract last speed= line
-              SPEED=$(grep -oP 'speed=\s*[\d.]+x' /tmp/ffmpeg.log | tail -1 | tr -d ' ')
-              [ -z "$SPEED" ] && SPEED="calculating..."
-              MESSAGE="🎞 *Compressing...* (speed: ${SPEED})"
-              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/editMessageText" \
-                -d "chat_id=${CHAT_ID}" \
-                -d "message_id=${MSG_ID}" \
-                -d "text=${MESSAGE}" \
-                -d "parse_mode=Markdown" > /dev/null
-            fi
-          done
-          wait $FFMPEG_PID
-          # Compression done
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/editMessageText" \
-            -d "chat_id=${CHAT_ID}" \
+          # Compression finished
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+            -d "chat_id=${USER_CHAT_ID}" \
             -d "message_id=${MSG_ID}" \
             -d "text=✅ *Compressed successfully!*" \
             -d "parse_mode=Markdown"
 
-      # ---------- UPLOAD WITH PROGRESS ----------
-      - name: Upload compressed video with progress
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          CHAT_ID: ${{ github.event.inputs.chat_id }}
-          MSG_ID: ${{ github.event.inputs.message_id }}
+      # ⛔ If compression fails – update message and stop
+      - name: Handle compression failure
+        if: failure()
         run: |
-          # Start upload with progress bar to stderr
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+            -d "chat_id=${USER_CHAT_ID}" \
+            -d "message_id=${MSG_ID}" \
+            -d "text=❌ *Compression failed. Process stopped.*" \
+            -d "parse_mode=Markdown"
+          exit 1
+
+      # ------------------------------------------------------------------
+      # 📤 Upload compressed video back to user
+      # ------------------------------------------------------------------
+      - name: Upload compressed video with progress
+        id: upload
+        run: |
+          # Upload with progress parsing
           curl -# -F "video=@compressed.mp4" \
-                  -F "caption=Here is your compressed video (${QUALITY}p)" \
-                  "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendVideo" 2> /tmp/upload_progress.txt &
-          CURL_PID=$!
-
-          LAST_SIZE=0
-          LAST_TIME=$(date +%s)
-          while kill -0 $CURL_PID 2>/dev/null; do
-            sleep 2
-            LINE=$(tail -n 1 /tmp/upload_progress.txt | tr '\r' '\n' | tail -n 1)
-            PERCENT=$(echo "$LINE" | grep -oP '\d+(\.\d+)?%' | head -1 | tr -d '%')
-            [ -z "$PERCENT" ] && PERCENT=0
-            UPLOADED_SIZE=$(echo "$LINE" | grep -oP '\d+(\.\d+)?[KMGT]' | tail -1 || echo "")
-            # Speed calculation (using compressed.mp4 size?)
-            CURRENT_SIZE=$(stat -c%s compressed.mp4 2>/dev/null || echo 0)
-            # Upload progress not based on file size on disk. Instead track response body length? Easier: use size of compressed file and assume it's being uploaded.
-            # However, we don't know uploaded bytes directly. We'll approximate using PERCENT of file size.
-            TOTAL_BYTES=$(stat -c%s compressed.mp4)
-            NOW=$(date +%s)
-            ELAPSED=$(( NOW - LAST_TIME ))
-            # Use percentage to guess uploaded bytes
-            UPLOADED_BYTES=$(echo "scale=0; ${TOTAL_BYTES} * ${PERCENT} / 100" | bc)
-            if [ $ELAPSED -gt 0 ] && [ -n "$UPLOADED_BYTES" ] && [ "$LAST_SIZE" -ne 0 ]; then
-              SPEED_BYTES=$(( (UPLOADED_BYTES - LAST_SIZE) / ELAPSED ))
-              SPEED_MB=$(echo "scale=2; ${SPEED_BYTES}/1048576" | bc)
-            else
-              SPEED_MB="..."
-              LAST_SIZE=0
+               -F "caption=Here is your compressed video (${QUALITY}p)" \
+               "https://api.telegram.org/bot${BOT_TOKEN}/sendVideo" 2>&1 | \
+          while IFS= read -r line; do
+            if [[ "$line" =~ % ]]; then
+              percent=$(echo "$line" | grep -oP '\d+(\.\d+)?%' | head -1)
+              num=${percent%\%}
+              filled=$((num * 20 / 100))
+              bar=$(printf "%0.s█" $(seq 1 $filled))
+              empty=$(printf "%0.s░" $(seq 1 $((20 - filled))))
+              # Update every 5% to avoid rate limits
+              if (( num % 5 == 0 )); then
+                curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+                  -d "chat_id=${USER_CHAT_ID}" \
+                  -d "message_id=${MSG_ID}" \
+                  -d "text=📤 *Uploading...* [${bar}${empty}] ${percent}" \
+                  -d "parse_mode=Markdown" > /dev/null
+              fi
             fi
-            LAST_SIZE=${UPLOADED_BYTES}
-            LAST_TIME=${NOW}
-            BARS=20
-            FILLED=$(echo "scale=0; ${PERCENT}/5" | bc)
-            EMPTY=$(( BARS - FILLED ))
-            BAR=$(printf "%0.s█" $(seq 1 $FILLED))
-            BAR+=$(printf "%0.s░" $(seq 1 $EMPTY))
-            MESSAGE="📤 *Uploading...* [${BAR}] ${PERCENT}%\n⚡ Speed: ${SPEED_MB} MB/s"
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/editMessageText" \
-              -d "chat_id=${CHAT_ID}" \
-              -d "message_id=${MSG_ID}" \
-              -d "text=${MESSAGE}" \
-              -d "parse_mode=Markdown" > /dev/null
           done
-          wait $CURL_PID
-
-          # Final message: video sent
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/editMessageText" \
-            -d "chat_id=${CHAT_ID}" \
+          # Final success
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+            -d "chat_id=${USER_CHAT_ID}" \
             -d "message_id=${MSG_ID}" \
             -d "text=🎉 *Video sent successfully!*" \
+            -d "parse_mode=Markdown"
+
+      # ⛔ If upload fails – update message and stop
+      - name: Handle upload failure
+        if: failure()
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+            -d "chat_id=${USER_CHAT_ID}" \
+            -d "message_id=${MSG_ID}" \
+            -d "text=❌ *Upload failed. Process stopped.*" \
+            -d "parse_mode=Markdown"
+          exit 1
+
+      # ------------------------------------------------------------------
+      # 🎯 Final step – job completed (only if all above succeeded)
+      # ------------------------------------------------------------------
+      - name: Final completion message
+        if: success()
+        run: |
+          # Already updated by upload step, but we can send an extra line if desired.
+          # This just ensures the user sees a final "Job finished" status.
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+            -d "chat_id=${USER_CHAT_ID}" \
+            -d "message_id=${MSG_ID}" \
+            -d "text=🏁 *All steps completed successfully!*" \
             -d "parse_mode=Markdown"
