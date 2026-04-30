@@ -1,4 +1,4 @@
-name: Video Compressor (Pyrogram Upload – Fixed)
+name: Video Compressor (Pyrogram Upload – Guaranteed)
 
 on:
   workflow_dispatch:
@@ -226,25 +226,29 @@ jobs:
               app = Client('my_account', api_id=int(os.environ['API_ID']),
                            api_hash=os.environ['API_HASH'])
               await app.start()
+              sent_msg = None
               try:
                   end_time = time.time()
                   elapsed = int(end_time - COMPRESS_START)
                   mins, sec = divmod(elapsed, 60)
                   caption = f'Quality: {QUALITY}p | Time taken: {mins}m {sec}s'
 
-                  await app.send_document(
+                  sent_msg = await app.send_document(
                       chat_id=int(USER_CHAT_ID),
                       document=FILE_PATH,
                       caption=caption,
                       reply_to_message_id=ORIGINAL_MSG_ID
                   )
-                  # Delete the progress message (success)
+                  # Success: update the progress message then delete it after a short delay
+                  update_message('📤 *Upload complete!*')
+                  await asyncio.sleep(1)   # give time for the message to be seen
                   await app.delete_messages(
                       chat_id=int(USER_CHAT_ID),
                       message_ids=MSG_ID
                   )
               except Exception as e:
                   update_message(f'❌ *Upload failed:* {str(e)[:200]}')
+                  # Do NOT delete the progress message; keep the error visible
                   raise
               finally:
                   await app.stop()
