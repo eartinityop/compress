@@ -1,4 +1,4 @@
-name: Video Compressor (Final – Folder + Speed)
+name: Video Compressor (Final – Error‑Proof Upload)
 
 on:
   workflow_dispatch:
@@ -207,35 +207,44 @@ jobs:
           exit 1
 
       # ------------------------------------------------------------------
-      # 📤 Upload compressed video with progress
+      # 📤 Upload compressed video (error‑proof)
       # ------------------------------------------------------------------
-      - name: Upload compressed video with progress
+      - name: Upload compressed video with progress (error‑proof)
         id: upload
         run: |
-          curl -# -F "video=@compress/compressed.mp4" \
+          # 1. Verify compressed file exists
+          if [ ! -f compress/compressed.mp4 ]; then
+            curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+              -d "chat_id=${USER_CHAT_ID}" \
+              -d "message_id=${MSG_ID}" \
+              -d "text=❌ *Upload failed – compressed file missing.*" \
+              -d "parse_mode=Markdown"
+            exit 1
+          fi
+
+          # 2. Upload with progress, capturing HTTP status & body
+          UPLOAD_OUTPUT=$(curl -# -F "video=@compress/compressed.mp4" \
                -F "caption=Here is your compressed video (${QUALITY}p)" \
-               "https://api.telegram.org/bot${BOT_TOKEN}/sendVideo" 2>&1 | \
-          while IFS= read -r line; do
-            if [[ "$line" =~ % ]]; then
-              percent=$(echo "$line" | grep -oP '\d+(\.\d+)?%' | head -1)
-              num=$(echo "${percent%\%}" | cut -d'.' -f1)
-              filled=$((num * 20 / 100))
-              bar=$(printf "%0.s█" $(seq 1 $filled))
-              empty=$(printf "%0.s░" $(seq 1 $((20 - filled))))
-              if (( num % 5 == 0 )); then
-                curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
-                  -d "chat_id=${USER_CHAT_ID}" \
-                  -d "message_id=${MSG_ID}" \
-                  -d "text=📤 *Uploading...* [${bar}${empty}] ${percent}" \
-                  -d "parse_mode=Markdown" > /dev/null
-              fi
-            fi
-          done
-          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
-            -d "chat_id=${USER_CHAT_ID}" \
-            -d "message_id=${MSG_ID}" \
-            -d "text=🎉 *Video sent successfully!*" \
-            -d "parse_mode=Markdown"
+               -F "chat_id=${USER_CHAT_ID}" \
+               "https://api.telegram.org/bot${BOT_TOKEN}/sendVideo" 2>&1)
+
+          # 3. Check if the upload succeeded (Telegram returns JSON with "ok":true)
+          if echo "$UPLOAD_OUTPUT" | grep -q '"ok":true'; then
+            curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+              -d "chat_id=${USER_CHAT_ID}" \
+              -d "message_id=${MSG_ID}" \
+              -d "text=🎉 *Video sent successfully!*" \
+              -d "parse_mode=Markdown"
+          else
+            # Extract error description
+            ERROR_MSG=$(echo "$UPLOAD_OUTPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('description','Unknown error'))" 2>/dev/null || echo "Upload failed (could not parse response)")
+            curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+              -d "chat_id=${USER_CHAT_ID}" \
+              -d "message_id=${MSG_ID}" \
+              -d "text=❌ *Upload failed:* ${ERROR_MSG}" \
+              -d "parse_mode=Markdown"
+            exit 1
+          fi
 
       - name: Handle upload failure
         if: failure()
