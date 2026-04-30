@@ -6,6 +6,9 @@ on:
       original_message_id:
         description: 'Message ID of the video in user chat'
         required: true
+      bot_id:
+        description: 'Bot user ID (the chat ID for the user account)'
+        required: true
       user_id:
         description: 'User ID (the user who sent the video)'
         required: true
@@ -23,7 +26,7 @@ jobs:
 
     env:
       BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      USER_CHAT_ID: ${{ github.event.inputs.user_id }}
+      USER_CHAT_ID: ${{ github.event.inputs.user_id }}   # for sending progress updates
       MSG_ID: ${{ github.event.inputs.message_id }}
       QUALITY: ${{ github.event.inputs.quality }}
 
@@ -49,12 +52,13 @@ jobs:
             -d "text=${MESSAGE}" \
             -d "parse_mode=Markdown"
 
-      - name: Download video using Pyrogram (from user's chat)
+      - name: Download video using Pyrogram (from bot chat)
         id: download
         env:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
           SESSION_B64: ${{ secrets.USER_SESSION_BASE64 }}
+          BOT_ID: ${{ github.event.inputs.bot_id }}
           USER_ID: ${{ github.event.inputs.user_id }}
           ORIGINAL_MSG_ID: ${{ github.event.inputs.original_message_id }}
         run: |
@@ -64,9 +68,9 @@ jobs:
           from pyrogram import Client
 
           BOT_TOKEN = os.environ['BOT_TOKEN']
-          USER_CHAT_ID = os.environ['USER_CHAT_ID']
+          USER_CHAT_ID = os.environ['USER_ID']   # for progress updates
           MSG_ID = int(os.environ['MSG_ID'])
-          USER_ID = int(os.environ['USER_ID'])
+          BOT_ID = int(os.environ['BOT_ID'])     # chat ID of the bot from user's perspective
           ORIGINAL_MSG_ID = int(os.environ['ORIGINAL_MSG_ID'])
 
           def update_message(text):
@@ -88,8 +92,8 @@ jobs:
               app = Client('my_account', api_id=int(os.environ['API_ID']),
                            api_hash=os.environ['API_HASH'])
               await app.start()
-              # Fetch the video message directly from the user's private chat with the bot
-              msg = await app.get_messages(USER_ID, ORIGINAL_MSG_ID)
+              # Fetch the video message from the private chat with the bot
+              msg = await app.get_messages(BOT_ID, ORIGINAL_MSG_ID)
               await msg.download(file_name='original.mp4', progress=progress)
               await app.stop()
               update_message('✅ *Download complete!*')
