@@ -1,4 +1,4 @@
-name: Video Compressor (Final – Document Upload + Reply)
+name: Video Compressor (Final – Curl Upload + Reply)
 
 on:
   workflow_dispatch:
@@ -180,118 +180,48 @@ jobs:
             -d "text=❌ *Compression failed. Process stopped.*" -d "parse_mode=Markdown"
           exit 1
 
-      # ────────── Upload as document (reply + progress + time) ──────────
-      - name: Upload compressed file as document (reply to original)
+      # ────────── Upload as document (curl + progress + reply + time) ──────────
+      - name: Upload compressed file as document (curl‑based)
         id: upload
         env:
           COMPRESS_START: ${{ env.COMPRESS_START }}
           ORIGINAL_MSG_ID: ${{ github.event.inputs.original_message_id }}
         run: |
-          python -c "
-          import os, time, requests, sys
+          FILE="compress/compressed.mp4"
+          if [ ! -f "$FILE" ]; then
+            curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+              -d "chat_id=${USER_CHAT_ID}" -d "message_id=${MSG_ID}" \
+              -d "text=❌ *Upload failed – compressed file missing.*" -d "parse_mode=Markdown"
+            exit 1
+          fi
 
-          BOT_TOKEN = os.environ['BOT_TOKEN']
-          CHAT_ID = os.environ['USER_CHAT_ID']
-          MSG_ID = int(os.environ['MSG_ID'])
-          QUALITY = os.environ['QUALITY']
-          COMPRESS_START = int(os.environ['COMPRESS_START'])
-          ORIGINAL_MSG_ID = int(os.environ['ORIGINAL_MSG_ID'])
-          FILE_PATH = 'compress/compressed.mp4'
+          TOTAL_SIZE=$(stat -c%s "$FILE")
+          TOTAL_MB=$(echo "scale=2; $TOTAL_SIZE/1048576" | bc)
 
-          if not os.path.exists(FILE_PATH):
-              requests.post(f'https://api.telegram.org/bot{BOT_TOKEN}/editMessageText', json={
-                  'chat_id': CHAT_ID, 'message_id': MSG_ID,
-                  'text': '❌ *Upload failed – compressed file missing.*', 'parse_mode': 'Markdown'
-              })
-              sys.exit(1)
+          # Build caption with quality + time
+          COMPRESS_END=$(date +%s)
+          ELAPSED=$(( COMPRESS_END - COMPRESS_START ))
+          MINS=$(( ELAPSED / 60 ))
+          SECS=$(( ELAPSED % 60 ))
+          CAPTION="Quality: ${QUALITY}p | Time taken: ${MINS}m ${SECS}s"
 
-          total_size = os.path.getsize(FILE_PATH)
-          total_mb = total_size / 1048576
-          last_bytes = [0]
-          last_time = [time.time()]
+          # Upload with progress bar parsing
+          UPLOAD_RESPONSE=$(curl -# \
+            -F "document=@${FILE}" \
+            -F "caption=${CAPTION}" \
+            -F "reply_to_message_id=${ORIGINAL_MSG_ID}" \
+            -F "chat_id=${USER_CHAT_ID}" \
+            "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" 2>&1 | tee /tmp/upload.log)
 
-          def update_message(text):
-              requests.post(f'https://api.telegram.org/bot{BOT_TOKEN}/editMessageText', json={
-                  'chat_id': CHAT_ID, 'message_id': MSG_ID,
-                  'text': text, 'parse_mode': 'Markdown'
-              })
-
-          def progress_callback(monitor):
-              now = time.time()
-              elapsed = now - last_time[0]
-              if elapsed < 1: return
-              speed = (monitor.bytes_read - last_bytes[0]) / elapsed if elapsed > 0 else 0
-              speed_mb = speed / 1048576
-              pct = int(monitor.bytes_read * 100 / total_size)
-              cur_mb = monitor.bytes_read / 1048576
-              bar_len = 20
-              filled = int(pct * bar_len / 100)
-              bar = '█' * filled + '░' * (bar_len - filled)
-              update_message(
-                  f'📤 *Uploading...* [{bar}] {pct}%\n'
-                  f'({cur_mb:.1f} / {total_mb:.1f} MB)  ⚡ {speed_mb:.1f} MB/s'
-              )
-              last_time[0] = now
-              last_bytes[0] = monitor.bytes_read
-
-          class ProgressFile:
-              def __init__(self, f, callback):
-                  self.f = f
-                  self.callback = callback
-                  self.bytes_read = 0
-              def read(self, size=-1):
-                  data = self.f.read(size)
-                  if data:
-                      self.bytes_read += len(data)
-                      self.callback(self)
-                  return data
-              def seek(self, pos):
-                  self.f.seek(pos)
-                  self.bytes_read = pos
-              def tell(self):
-                  return self.f.tell()
-
-          # Calculate compression time
-          end_time = time.time()
-          elapsed = int(end_time - COMPRESS_START)
-          mins, sec = divmod(elapsed, 60)
-          caption = f'Quality: {QUALITY}p | Time taken: {mins}m {sec}s'
-
-          with open(FILE_PATH, 'rb') as f:
-              pf = ProgressFile(f, progress_callback)
-              files = {'document': (os.path.basename(FILE_PATH), pf)}
-              resp = requests.post(
-                  f'https://api.telegram.org/bot{BOT_TOKEN}/sendDocument',
-                  data={
-                      'chat_id': CHAT_ID,
-                      'caption': caption,
-                      'reply_to_message_id': ORIGINAL_MSG_ID      # <-- reply to original video
-                  },
-                  files=files
-              )
-
-          if resp.status_code == 200 and resp.json().get('ok'):
-              # Delete the progress message so only the final document remains
-              requests.post(f'https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage', json={
-                  'chat_id': CHAT_ID, 'message_id': MSG_ID
-              })
-          else:
-              error = resp.json().get('description', 'Unknown error')
-              update_message(f'❌ *Upload failed:* {error}')
-              sys.exit(1)
-          "
-
-      - name: Handle upload failure
-        if: failure()
-        run: |
-          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
-            -d "chat_id=${USER_CHAT_ID}" -d "message_id=${MSG_ID}" \
-            -d "text=❌ *Upload failed. Process stopped.*" -d "parse_mode=Markdown"
-          exit 1
-
-      - name: Final completion message (optional, only if upload didn't delete)
-        if: success()
-        run: |
-          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
-            -d "chat_id=${USER_CHAT_ID}" -d "message_id=${MSG_ID}" \
-            -d "text=🏁 *All steps completed successfully!*" -d "parse_mode=Markdown"
+          # Check if success
+          if grep -q '"ok":true' /tmp/upload.log; then
+            # Delete progress message
+            curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/deleteMessage" \
+              -d "chat_id=${USER_CHAT_ID}" -d "message_id=${MSG_ID}"
+          else
+            ERROR_MSG=$(python3 -c "import sys,json; d=json.load(open('/tmp/upload.log')); print(d.get('description','Unknown error'))" 2>/dev/null || echo "Upload failed")
+            curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+              -d "chat_id=${USER_CHAT_ID}" -d "message_id=${MSG_ID}" \
+              -d "text=❌ *Upload failed:* ${ERROR_MSG}" -d "parse_mode=Markdown"
+            exit 1
+          fi
