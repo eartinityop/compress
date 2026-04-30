@@ -1,4 +1,4 @@
-name: Video Compressor (Full Error Logs + Cancel)
+name: Video Compressor (Pyrogram Upload – No Size Limit)
 
 on:
   workflow_dispatch:
@@ -16,7 +16,7 @@ on:
         description: 'Target height (240/360/480/720/1080)'
         required: true
       message_id:
-        description: 'Progress message ID to update'
+        description: 'Progress message ID to update (the same as the bot message)'
         required: true
       original_message_id:
         description: 'Original video message ID (for reply)'
@@ -55,7 +55,7 @@ jobs:
             -d "chat_id=${USER_CHAT_ID}" -d "message_id=${MSG_ID}" \
             -d "text=${MESSAGE}" -d "parse_mode=Markdown"
 
-      # ---------- Download with size + speed, error log to /tmp/download_err.log ----------
+      # ---------- Download with size + speed ----------
       - name: Download video from channel using Pyrogram
         id: download
         env:
@@ -117,7 +117,6 @@ jobs:
                       await msg.download(file_name=OUTPUT_FILE, progress=progress)
                       update_message('✅ *Download complete!*')
               except Exception as e:
-                  # Log the error
                   with open('/tmp/download_err.log', 'w') as f:
                       import traceback
                       traceback.print_exc(file=f)
@@ -126,7 +125,7 @@ jobs:
               await app.stop()
 
           asyncio.run(main())
-          " 2>/tmp/download_err.log || true  # also capture any stderr from the python process itself
+          " 2>/tmp/download_err.log || true
 
       - name: Handle download failure (show error log)
         if: failure() && steps.download.outcome == 'failure'
@@ -159,7 +158,7 @@ jobs:
         if: failure() && steps.verify.outcome == 'failure'
         run: exit 1
 
-      # ---------- Compression (log to /tmp/ffmpeg.log) ----------
+      # ---------- Compression ----------
       - name: Compress video
         id: compress
         run: |
@@ -175,7 +174,6 @@ jobs:
               -d "chat_id=${USER_CHAT_ID}" -d "message_id=${MSG_ID}" \
               -d "text=✅ *Compressed successfully!*" -d "parse_mode=Markdown"
           else
-            # Failure: show log
             FFLOG=$(tail -n 30 /tmp/ffmpeg.log)
             ESCAPED=$(python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" <<< "$FFLOG")
             curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
@@ -185,60 +183,92 @@ jobs:
             exit 1
           fi
 
-      - name: Handle compression failure (already handled above, but extra safety)
+      - name: Handle compression failure
         if: failure() && steps.compress.outcome == 'failure'
         run: exit 1
 
-      # ---------- Upload with reliable error capture ----------
-      - name: Upload compressed file as document (reliable)
+      # ---------- Upload using Pyrogram (user account, no size limit) ----------
+      - name: Send compressed file via Pyrogram (user account)
         id: upload
         env:
-          COMPRESS_START: ${{ env.COMPRESS_START }}
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
+          SESSION_B64: ${{ secrets.USER_SESSION_BASE64 }}
           ORIGINAL_MSG_ID: ${{ github.event.inputs.original_message_id }}
+          COMPRESS_START: ${{ env.COMPRESS_START }}
         run: |
-          FILE="compress/compressed.mp4"
-          if [ ! -f "$FILE" ]; then
-            curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
-              -d "chat_id=${USER_CHAT_ID}" -d "message_id=${MSG_ID}" \
-              -d "text=❌ *Upload failed – compressed file missing.*" -d "parse_mode=Markdown"
-            exit 1
-          fi
+          echo "$SESSION_B64" | base64 -d > my_account.session
+          python -c "
+          import os, asyncio, time
+          from pyrogram import Client
 
-          TOTAL_SIZE=$(stat -c%s "$FILE")
-          TOTAL_MB=$(echo "scale=2; $TOTAL_SIZE/1048576" | bc)
-          COMPRESS_END=$(date +%s)
-          ELAPSED=$(( COMPRESS_END - COMPRESS_START ))
-          MINS=$(( ELAPSED / 60 ))
-          SECS=$(( ELAPSED % 60 ))
-          CAPTION="Quality: ${QUALITY}p | Time taken: ${MINS}m ${SECS}s"
+          BOT_TOKEN = os.environ['BOT_TOKEN']
+          USER_CHAT_ID = os.environ['USER_CHAT_ID']
+          MSG_ID = int(os.environ['MSG_ID'])
+          QUALITY = os.environ['QUALITY']
+          COMPRESS_START = int(os.environ['COMPRESS_START'])
+          ORIGINAL_MSG_ID = int(os.environ['ORIGINAL_MSG_ID'])
+          FILE_PATH = 'compress/compressed.mp4'
 
-          # Upload: progress on stderr, response saved to /tmp/response.json
-          curl -# -o /tmp/response.json \
-            -F "document=@${FILE}" \
-            -F "caption=${CAPTION}" \
-            -F "reply_to_message_id=${ORIGINAL_MSG_ID}" \
-            -F "chat_id=${USER_CHAT_ID}" \
-            "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" 2>/tmp/upload_progress.log
+          import requests
+          def update_message(text):
+              requests.post(f'https://api.telegram.org/bot{BOT_TOKEN}/editMessageText', json={
+                  'chat_id': USER_CHAT_ID, 'message_id': MSG_ID,
+                  'text': text, 'parse_mode': 'Markdown'
+              })
 
-          if grep -q '"ok":true' /tmp/response.json; then
-            # Success: delete progress message
-            curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/deleteMessage" \
-              -d "chat_id=${USER_CHAT_ID}" -d "message_id=${MSG_ID}"
-          else
-            ERROR_MSG=$(python3 -c "import sys,json; d=json.load(open('/tmp/response.json')); print(d.get('description','Unknown error'))" 2>/dev/null || echo "Unknown error")
-            curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
-              -d "chat_id=${USER_CHAT_ID}" -d "message_id=${MSG_ID}" \
-              -d "text=❌ *Upload failed:* ${ERROR_MSG}" -d "parse_mode=Markdown"
-            exit 1
-          fi
+          async def main():
+              if not os.path.exists(FILE_PATH):
+                  update_message('❌ *Upload failed – compressed file missing.*')
+                  return
 
-      - name: Handle upload failure (if not already caught)
+              update_message('📤 *Uploading...*')
+              app = Client('my_account', api_id=int(os.environ['API_ID']),
+                           api_hash=os.environ['API_HASH'])
+              await app.start()
+              try:
+                  end_time = time.time()
+                  elapsed = int(end_time - COMPRESS_START)
+                  mins, sec = divmod(elapsed, 60)
+                  caption = f'Quality: {QUALITY}p | Time taken: {mins}m {sec}s'
+
+                  await app.send_document(
+                      chat_id=int(USER_CHAT_ID),
+                      document=FILE_PATH,
+                      caption=caption,
+                      reply_to_message_id=ORIGINAL_MSG_ID
+                  )
+                  # Delete the progress message (success)
+                  await app.invoke(
+                      app.handler.delete_messages(
+                          chat_id=int(USER_CHAT_ID),
+                          message_ids=[MSG_ID]
+                      )
+                  )
+              except Exception as e:
+                  update_message(f'❌ *Upload failed:* {str(e)[:200]}')
+                  raise
+              finally:
+                  await app.stop()
+
+          asyncio.run(main())
+          " 2>/tmp/upload_err.log
+
+      - name: Handle upload failure (show log)
         if: failure() && steps.upload.outcome == 'failure'
-        run: exit 1
+        run: |
+          LOG=$(tail -n 20 /tmp/upload_err.log 2>/dev/null || echo "No log captured")
+          ESCAPED=$(python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" <<< "$LOG")
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+            -d "chat_id=${USER_CHAT_ID}" -d "message_id=${MSG_ID}" \
+            -d "text=❌ *Upload failed.* Error log:\n\`\`\`${ESCAPED}\`\`\`" \
+            -d "parse_mode=Markdown"
+          exit 1
 
       - name: Final completion message (only if upload didn't delete)
         if: success()
         run: |
           curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
             -d "chat_id=${USER_CHAT_ID}" -d "message_id=${MSG_ID}" \
-            -d "text=🏁 *All steps completed successfully!*" -d "parse_mode=Markdown"
+            -d "text=🏁 *All steps completed successfully!*" \
+            -d "parse_mode=Markdown"
