@@ -3,8 +3,8 @@ name: Video Compressor (Channel Method)
 on:
   workflow_dispatch:
     inputs:
-      channel_id:
-        description: 'Private channel ID (where video was forwarded)'
+      channel_username:
+        description: 'Channel username (where video was forwarded)'
         required: true
       fwd_message_id:
         description: 'Message ID of forwarded video in channel'
@@ -58,7 +58,7 @@ jobs:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
           SESSION_B64: ${{ secrets.USER_SESSION_BASE64 }}
-          CHANNEL_ID: ${{ github.event.inputs.channel_id }}
+          CHANNEL_USERNAME: ${{ github.event.inputs.channel_username }}
           FWD_MSG_ID: ${{ github.event.inputs.fwd_message_id }}
         run: |
           echo "$SESSION_B64" | base64 -d > my_account.session
@@ -69,7 +69,7 @@ jobs:
           BOT_TOKEN = os.environ['BOT_TOKEN']
           USER_CHAT_ID = os.environ['USER_CHAT_ID']
           MSG_ID = int(os.environ['MSG_ID'])
-          CHANNEL_ID = int(os.environ['CHANNEL_ID'])
+          CHANNEL_USERNAME = int(os.environ['CHANNEL_USERNAME'])
           FWD_MSG_ID = int(os.environ['FWD_MSG_ID'])
 
           def update_message(text):
@@ -92,13 +92,13 @@ jobs:
                            api_hash=os.environ['API_HASH'])
               await app.start()
               # Force access to channel (you are admin, always succeeds)
-              chat = await app.get_chat(CHANNEL_ID)
+              chat = await app.get_chat(CHANNEL_USERNAME)
               msg = await app.get_messages(chat.id, FWD_MSG_ID)
-              if not msg or not msg.media:
-                  update_message('❌ *Video not found in channel.*')
-              else:
+              if msg and (msg.video or msg.document):
                   await msg.download(file_name='original.mp4', progress=progress)
                   update_message('✅ *Download complete!*')
+              else:  
+                  update_message('❌ *Video not found in channel.*')
               await app.stop()
 
           asyncio.run(main())
