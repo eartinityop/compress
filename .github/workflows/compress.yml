@@ -1,4 +1,4 @@
-name: Video Compressor (Pyrogram Upload – Guaranteed)
+name: Video Compressor (Guaranteed Upload)
 
 on:
   workflow_dispatch:
@@ -16,7 +16,7 @@ on:
         description: 'Target height (240/360/480/720/1080)'
         required: true
       message_id:
-        description: 'Progress message ID to update (the same as the bot message)'
+        description: 'Progress message ID to update'
         required: true
       original_message_id:
         description: 'Original video message ID (for reply)'
@@ -55,7 +55,7 @@ jobs:
             -d "chat_id=${USER_CHAT_ID}" -d "message_id=${MSG_ID}" \
             -d "text=${MESSAGE}" -d "parse_mode=Markdown"
 
-      # ---------- Download with size + speed ----------
+      # ---------- Download ----------
       - name: Download video from channel using Pyrogram
         id: download
         env:
@@ -127,7 +127,7 @@ jobs:
           asyncio.run(main())
           " 2>/tmp/download_err.log || true
 
-      - name: Handle download failure (show error log)
+      - name: Handle download failure
         if: failure() && steps.download.outcome == 'failure'
         run: |
           LOG=$(tail -n 20 /tmp/download_err.log 2>/dev/null || echo "No log captured")
@@ -187,8 +187,8 @@ jobs:
         if: failure() && steps.compress.outcome == 'failure'
         run: exit 1
 
-      # ---------- Upload using Pyrogram (user account, no size limit) ----------
-      - name: Send compressed file via Pyrogram (user account)
+      # ---------- Upload (guaranteed delivery) ----------
+      - name: Send compressed file via Pyrogram (guaranteed)
         id: upload
         env:
           API_ID: ${{ secrets.API_ID }}
@@ -220,13 +220,12 @@ jobs:
           async def main():
               if not os.path.exists(FILE_PATH):
                   update_message('❌ *Upload failed – compressed file missing.*')
-                  return
+                  raise Exception('Compressed file missing')
 
               update_message('📤 *Uploading...*')
               app = Client('my_account', api_id=int(os.environ['API_ID']),
                            api_hash=os.environ['API_HASH'])
               await app.start()
-              sent_msg = None
               try:
                   end_time = time.time()
                   elapsed = int(end_time - COMPRESS_START)
@@ -239,16 +238,19 @@ jobs:
                       caption=caption,
                       reply_to_message_id=ORIGINAL_MSG_ID
                   )
-                  # Success: update the progress message then delete it after a short delay
+                  # Verify the message was actually sent by checking its ID
+                  if sent_msg is None or not hasattr(sent_msg, 'id'):
+                      raise Exception('send_document returned no message')
+
+                  # Success → show "Upload complete" then delete
                   update_message('📤 *Upload complete!*')
-                  await asyncio.sleep(1)   # give time for the message to be seen
+                  await asyncio.sleep(1)
                   await app.delete_messages(
                       chat_id=int(USER_CHAT_ID),
                       message_ids=MSG_ID
                   )
               except Exception as e:
                   update_message(f'❌ *Upload failed:* {str(e)[:200]}')
-                  # Do NOT delete the progress message; keep the error visible
                   raise
               finally:
                   await app.stop()
@@ -256,7 +258,7 @@ jobs:
           asyncio.run(main())
           " 2>/tmp/upload_err.log
 
-      - name: Handle upload failure (show log)
+      - name: Handle upload failure
         if: failure() && steps.upload.outcome == 'failure'
         run: |
           LOG=$(tail -n 20 /tmp/upload_err.log 2>/dev/null || echo "No log captured")
