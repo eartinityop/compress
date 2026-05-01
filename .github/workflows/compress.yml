@@ -1,4 +1,4 @@
-name: Video Compressor (Syntax Fixed, Guaranteed Upload)
+name: Video Compressor (Upload to Bot Chat)
 
 on:
   workflow_dispatch:
@@ -20,6 +20,9 @@ on:
         required: true
       original_message_id:
         description: 'Original video message ID (for reply)'
+        required: true
+      bot_id:
+        description: 'Bot numeric ID (to send the compressed file to the correct chat)'
         required: true
 
 jobs:
@@ -138,7 +141,7 @@ jobs:
             -d "parse_mode=Markdown"
           exit 1
 
-      # ---------- Verify downloaded file ----------
+      # ---------- Verify file ----------
       - name: Verify downloaded file exists
         id: verify
         run: |
@@ -187,14 +190,15 @@ jobs:
         if: failure() && steps.compress.outcome == 'failure'
         run: exit 1
 
-      # ---------- Upload via Pyrogram (user account, no size limit) ----------
-      - name: Send compressed file via Pyrogram (user account, fixed)
+      # ---------- Upload via Pyrogram (to bot chat) ----------
+      - name: Send compressed file via Pyrogram (to bot chat)
         id: upload
         env:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
           SESSION_B64: ${{ secrets.USER_SESSION_BASE64 }}
           ORIGINAL_MSG_ID: ${{ github.event.inputs.original_message_id }}
+          BOT_ID: ${{ github.event.inputs.bot_id }}
           COMPRESS_START: ${{ env.COMPRESS_START }}
         run: |
           echo "$SESSION_B64" | base64 -d > my_account.session
@@ -208,6 +212,7 @@ jobs:
           QUALITY = os.environ['QUALITY']
           COMPRESS_START = int(os.environ['COMPRESS_START'])
           ORIGINAL_MSG_ID = int(os.environ['ORIGINAL_MSG_ID'])
+          BOT_ID = int(os.environ['BOT_ID'])   # chat ID of the bot from user's perspective
           FILE_PATH = 'compress/compressed.mp4'
 
           import requests
@@ -233,7 +238,7 @@ jobs:
                   caption = f'Quality: {QUALITY}p | Time taken: {mins}m {sec}s'
 
                   sent_msg = await app.send_document(
-                      chat_id=int(USER_CHAT_ID),
+                      chat_id=BOT_ID,          # <-- send to the bot chat
                       document=FILE_PATH,
                       caption=caption,
                       reply_to_message_id=ORIGINAL_MSG_ID
@@ -244,7 +249,7 @@ jobs:
                   update_message('📤 *Upload complete!*')
                   await asyncio.sleep(1)
                   await app.delete_messages(
-                      chat_id=int(USER_CHAT_ID),
+                      chat_id=int(USER_CHAT_ID),   # delete progress message from user's chat
                       message_ids=MSG_ID
                   )
               except Exception as e:
