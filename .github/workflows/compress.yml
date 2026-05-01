@@ -1,4 +1,4 @@
-name: Video Compressor (Guaranteed Upload)
+name: Video Compressor (Syntax Fixed, Guaranteed Upload)
 
 on:
   workflow_dispatch:
@@ -138,7 +138,7 @@ jobs:
             -d "parse_mode=Markdown"
           exit 1
 
-      # ---------- Verify file ----------
+      # ---------- Verify downloaded file ----------
       - name: Verify downloaded file exists
         id: verify
         run: |
@@ -187,8 +187,8 @@ jobs:
         if: failure() && steps.compress.outcome == 'failure'
         run: exit 1
 
-      # ---------- Upload (guaranteed delivery) ----------
-      - name: Send compressed file via Pyrogram (guaranteed)
+      # ---------- Upload via Pyrogram (user account, no size limit) ----------
+      - name: Send compressed file via Pyrogram (user account, fixed)
         id: upload
         env:
           API_ID: ${{ secrets.API_ID }}
@@ -238,11 +238,9 @@ jobs:
                       caption=caption,
                       reply_to_message_id=ORIGINAL_MSG_ID
                   )
-                  # Verify the message was actually sent by checking its ID
                   if sent_msg is None or not hasattr(sent_msg, 'id'):
                       raise Exception('send_document returned no message')
 
-                  # Success → show "Upload complete" then delete
                   update_message('📤 *Upload complete!*')
                   await asyncio.sleep(1)
                   await app.delete_messages(
