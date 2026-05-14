@@ -6,9 +6,9 @@ RUN apk add --no-cache \
     py3-pip \
     ffmpeg
 
-# Install Python dependencies
+# Install Python dependencies (allow system packages for Alpine)
 COPY requirements.txt .
-RUN pip3 install --no-cache-dir -r requirements.txt
+RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
 
 # Copy your bot code
 COPY . .
@@ -16,7 +16,7 @@ COPY . .
 # Make start.sh executable
 RUN chmod +x start.sh
 
-# Expose the port Render will use (the bot's proxy runs on 8000)
+# Expose the port Render uses (bot proxy runs on 8000)
 EXPOSE 8000
 
 # Start both services
