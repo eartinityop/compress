@@ -9,10 +9,12 @@ WF_FILE = "compress.yml"
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
 # =====================================
 
-# The public base URL of this service (Render provides RENDER_EXTERNAL_URL)
+# Public base URL (for workflow API calls) – provided by Render
 SERVICE_URL = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:8000")
-BOT_API_LOCAL = "http://localhost:8081"   # internal Telegram Bot API server
 BASE_URL = f"{SERVICE_URL}/bot"
+
+# Local Bot API server (internal, no proxy loop)
+BOT_API_LOCAL = "http://localhost:8081"
 
 # ---------- Reverse proxy + health server ----------
 class ProxyHandler(BaseHTTPRequestHandler):
@@ -36,11 +38,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         url = BOT_API_LOCAL + self.path
         content_length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(content_length) if content_length > 0 else None
-
-        # Forward headers (except Host)
         headers = {k: v for k, v in self.headers.items() if k.lower() != 'host'}
         resp = requests.request(method, url, data=body, headers=headers)
-
         self.send_response(resp.status_code)
         for k, v in resp.headers.items():
             self.send_header(k, v)
@@ -132,11 +131,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Error: Missing video info.")
             return
 
-        # Edit the message to show "Triggering workflow..." (keyboard will be added by the workflow)
+        # Edit the message to show "Triggering workflow..."
         await query.edit_message_text("⏳ Triggering workflow...")
         progress_msg_id = query.message.message_id
 
-        # Trigger the GitHub workflow
         url = f"https://api.github.com/repos/{REPO}/actions/workflows/{WF_FILE}/dispatches"
         headers = {
             "Authorization": f"token {GITHUB_TOKEN}",
@@ -151,7 +149,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "message_id": str(progress_msg_id),
                 "original_message_id": str(original_msg_id),
                 "original_caption": original_caption,
-                "api_base_url": BASE_URL
+                "api_base_url": BASE_URL   # workflow uses the public URL
             }
         }
         resp = requests.post(url, json=payload, headers=headers)
@@ -166,12 +164,15 @@ async def post_init(application: Application):
     print(f"Bot started. API base URL: {BASE_URL}")
 
 def main():
-    app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).base_url(BASE_URL).post_init(post_init).build()
+    # Use local API server for bot's own requests (no proxy loop / timeout)
+    app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]) \
+        .base_url("http://localhost:8081") \
+        .post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.VIDEO, video_handler))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.run_polling()
 
 if __name__ == "__main__":
-    start_proxy_server()   # starts the reverse proxy (also handles health checks)
+    start_proxy_server()   # starts the reverse proxy (handles workflow calls & health checks)
     main()
