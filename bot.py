@@ -3,7 +3,6 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
-# Enable detailed logging
 logging.basicConfig(level=logging.DEBUG, stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
@@ -48,16 +47,14 @@ def start_proxy_server():
     server = HTTPServer(("0.0.0.0", port), ProxyHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
+# ---------- Bot handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info("Received /start")
     await update.message.reply_text("I am Eartinity's personal video compressor bot👋👋.\nSend me a video to get started.")
 
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info("Received /ping")
     await update.message.reply_text("🏓 Pong!")
 
 async def video_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info("Received video")
     context.user_data["original_caption"] = update.message.caption or ""
     video = update.message.video
     if not video:
@@ -76,7 +73,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
-    logger.info(f"Button pressed: {data}")
     if data.startswith("cancel_run_"):
         run_id = data.split("_", 2)[2]
         url = f"https://api.github.com/repos/{REPO}/actions/runs/{run_id}/cancel"
@@ -135,7 +131,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Compression cancelled.")
 
 async def post_init(application: Application):
-    logger.info(f"Bot started. Workflow API base URL: {BASE_URL}")
+    # Delete any existing webhook – this allows polling to work
+    await application.bot.delete_webhook(drop_pending_updates=True)
+    logger.info("Webhook deleted, polling can now receive updates.")
+    
+    # Verify the bot token by getting info
+    me = await application.bot.get_me()
+    logger.info(f"Bot connected as @{me.username} (ID: {me.id})")
+    logger.info(f"Workflow API base URL: {BASE_URL}")
 
 def main():
     logger.info("Building Application...")
