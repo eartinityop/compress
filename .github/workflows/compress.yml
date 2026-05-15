@@ -1,4 +1,4 @@
-name: Video Compressor (Final – Safe JSON + Original Caption)
+name: Video Compressor (Final – No Duplicate Env)
 
 on:
   workflow_dispatch:
@@ -22,7 +22,7 @@ on:
         description: 'Original video message ID (for reply)'
         required: true
       bot_username:
-        description: 'Bot username (without @)'
+        description: 'Bot username (without @) – used for resolving chat in download'
         required: false
         default: ''
       original_caption:
@@ -52,7 +52,7 @@ jobs:
       - name: Create output directory
         run: mkdir -p compress
 
-      # ========== Runner specs (Cancel button always visible) ==========
+      # ---------- Runner specs ----------
       - name: Update Telegram with runner specs
         run: |
           jq -n \
@@ -69,7 +69,7 @@ jobs:
               reply_markup: { inline_keyboard: [[ { text: "Cancel ❌", callback_data: ("cancel_run_" + $rid) } ]] }
             }' | curl -s -X POST -d @- "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText"
 
-      # ========== Download with progress + Cancel ==========
+      # ---------- Download with progress + Cancel ----------
       - name: Download video from channel using Pyrogram
         id: download
         env:
@@ -78,6 +78,7 @@ jobs:
           SESSION_B64: ${{ secrets.USER_SESSION_BASE64 }}
           CHANNEL_USERNAME: ${{ github.event.inputs.channel_username }}
           FWD_MSG_ID: ${{ github.event.inputs.fwd_message_id }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
           echo "$SESSION_B64" | base64 -d > my_account.session
           python -c "
@@ -95,8 +96,6 @@ jobs:
           state = {'last_bytes': 0, 'last_time': time.time()}
 
           def update_message(text):
-              # Build the full JSON payload with cancel button using jq
-              import json, subprocess
               payload = {
                   'chat_id': USER_CHAT_ID,
                   'message_id': MSG_ID,
@@ -151,8 +150,6 @@ jobs:
 
           asyncio.run(main())
           " 2>/tmp/download_err.log || true
-        env:
-          GITHUB_RUN_ID: ${{ github.run_id }}
 
       - name: Handle download failure
         if: failure() && steps.download.outcome == 'failure'
@@ -162,7 +159,7 @@ jobs:
             '{chat_id: $chat_id, message_id: $msg_id, text: $text, parse_mode: "Markdown", reply_markup: { inline_keyboard: [[ { text: "Cancel ❌", callback_data: ("cancel_run_" + $rid) } ]] }}' | curl -s -X POST -d @- "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText"
           exit 1
 
-      # ========== Verify file (Cancel button) ==========
+      # ---------- Verify file ----------
       - name: Verify downloaded file exists
         id: verify
         run: |
@@ -180,7 +177,7 @@ jobs:
         if: failure() && steps.verify.outcome == 'failure'
         run: exit 1
 
-      # ========== Compression (Cancel button) ==========
+      # ---------- Compression ----------
       - name: Compress video
         id: compress
         run: |
@@ -204,7 +201,7 @@ jobs:
         if: failure() && steps.compress.outcome == 'failure'
         run: exit 1
 
-      # ========== Upload artifact ==========
+      # ---------- Upload artifact ----------
       - name: Upload compressed video to artifact
         uses: actions/upload-artifact@v4
         with:
@@ -212,7 +209,7 @@ jobs:
           path: compress/compressed.mp4
           retention-days: 7
 
-      # ========== Upload to channel + copy with fallback ==========
+      # ---------- Upload to channel + copy with fallback ----------
       - name: Send to channel via user, then bot copies to user (with fallback)
         id: upload
         env:
@@ -228,6 +225,7 @@ jobs:
           QUALITY: ${{ github.event.inputs.quality }}
           COMPRESS_START: ${{ env.COMPRESS_START }}
           ORIGINAL_CAPTION: ${{ github.event.inputs.original_caption }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
           echo "$SESSION_B64" | base64 -d > my_account.session
           python -c "
@@ -297,7 +295,7 @@ jobs:
                   elapsed = int(end_time - COMPRESS_START)
                   mins, sec = divmod(elapsed, 60)
 
-                  # Build final caption: original + quality + time
+                  # Build final caption
                   if ORIGINAL_CAPTION:
                       caption = f'{ORIGINAL_CAPTION} - {QUALITY}p'
                   else:
@@ -337,8 +335,6 @@ jobs:
 
           asyncio.run(main())
           " 2>/tmp/upload_err.log
-        env:
-          GITHUB_RUN_ID: ${{ github.run_id }}
 
       - name: Handle upload failure
         if: failure() && steps.upload.outcome == 'failure'
