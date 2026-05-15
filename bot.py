@@ -16,7 +16,7 @@ SERVICE_URL = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:8000")
 BASE_URL = f"{SERVICE_URL}/bot"
 BOT_API_LOCAL = "http://localhost:8081"
 
-# ---------- Proxy ----------
+# ---------- Proxy with fallback ----------
 class ProxyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/bot") or self.path.startswith("/file"):
@@ -31,20 +31,31 @@ class ProxyHandler(BaseHTTPRequestHandler):
         else:
             self.send_response(404)
             self.end_headers()
+
     def _proxy(self, method):
-        url = BOT_API_LOCAL + self.path
-        body = self.rfile.read(int(self.headers.get('Content-Length', 0))) if self.headers.get('Content-Length') else None
-        headers = {k:v for k,v in self.headers.items() if k.lower()!='host'}
-        resp = requests.request(method, url, data=body, headers=headers)
+        # Try local API first; on connection error fallback to public API
+        local_url = BOT_API_LOCAL + self.path
+        try:
+            resp = self._forward(method, local_url)
+        except requests.exceptions.ConnectionError:
+            logger.warning("Local API unreachable, falling back to public API")
+            public_url = f"https://api.telegram.org{self.path}"
+            resp = self._forward(method, public_url)
         self.send_response(resp.status_code)
-        for k,v in resp.headers.items():
-            self.send_header(k,v)
+        for k, v in resp.headers.items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(resp.content)
+
+    def _forward(self, method, url):
+        body = self.rfile.read(int(self.headers.get('Content-Length', 0))) if self.headers.get('Content-Length') else None
+        headers = {k:v for k,v in self.headers.items() if k.lower()!='host'}
+        return requests.request(method, url, data=body, headers=headers)
 
 def start_proxy():
     port = int(os.environ.get("PORT", 8000))
     HTTPServer(("0.0.0.0", port), ProxyHandler).serve_forever()
+# -------------------------------------------------
 
 # ---------- Bot handlers ----------
 async def start(update, context):
