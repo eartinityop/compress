@@ -2,14 +2,8 @@
 
 # Download the binary from your own release (only if not present)
 if [ ! -f ./telegram-bot-api ]; then
-    echo "Downloading telegram-bot-api from your release..."
-    RELEASE_URL="https://api.github.com/repos/eartinityop/compress/releases/tags/botapi-binary"
-    ASSET_URL=$(curl -s $RELEASE_URL | jq -r '.assets[0].browser_download_url')
-    if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" = "null" ]; then
-        echo "❌ Could not find binary in release. Please run the 'Build Telegram Bot API Binary' workflow first."
-        exit 1
-    fi
-    wget -q -O telegram-bot-api "$ASSET_URL"
+    echo "Downloading telegram-bot-api..."
+    wget -q -O telegram-bot-api "https://github.com/eartinityop/compress/releases/download/botapi-binary/telegram-bot-api-linux-amd64"
     chmod +x telegram-bot-api
 fi
 
