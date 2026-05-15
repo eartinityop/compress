@@ -1,0 +1,36 @@
+name: Build Telegram Bot API Binary
+
+on:
+  workflow_dispatch:          # manual trigger
+  schedule:
+    - cron: '0 0 1 * *'       # monthly auto-rebuild (optional)
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y git cmake g++ libssl-dev zlib1g-dev libc-ares-dev
+
+      - name: Clone & compile
+        run: |
+          git clone --depth 1 https://github.com/tdlib/telegram-bot-api.git
+          cd telegram-bot-api
+          mkdir build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release ..
+          cmake --build . --target telegram-bot-api -j$(nproc)
+          cp telegram-bot-api ../telegram-bot-api-linux-amd64
+
+      - name: Upload binary to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: botapi-binary
+          name: "Telegram Bot API Binary"
+          body: "Pre‑compiled static binary from tdlib/telegram-bot-api"
+          files: telegram-bot-api/telegram-bot-api-linux-amd64
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
