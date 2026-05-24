@@ -1,17 +1,15 @@
-import os, requests, threading
+import os, requests, threading, sys, logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
-# ========== CONFIGURE THESE ==========
+logging.basicConfig(level=logging.INFO, stream=sys.stdout)
+
 REPO = "eartinityop/compress"
 WF_FILE = "compress.yml"
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
-CHANNEL_USERNAME = "compresslog"
-BOT_USERNAME = "Eartinityvidcomp_bot"   # without @
-# =====================================
-
-RUN_IDS = {}
+CHANNEL_USERNAME = "eartvidcomp"   # without @
+# ------------------------------------------------------------
 
 # ---------- Health server for Render ----------
 class HealthHandler(BaseHTTPRequestHandler):
@@ -27,24 +25,30 @@ def start_health_server():
 # -----------------------------------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "I am Eartinity's personal video compressor bot👋👋.\nSend me a video to get started."
-    )
+    # Only respond in the configured channel
+    if update.message.chat.username != CHANNEL_USERNAME:
+        return
+    await update.message.reply_text("👋 Send me a video to compress. I'll ask for quality and a custom name.")
 
 async def video_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["original_msg_id"] = update.message.message_id
-    forwarded = await update.message.forward(f"@{CHANNEL_USERNAME}")
-    context.user_data["fwd_msg_id"] = forwarded.message_id
+    if update.message.chat.username != CHANNEL_USERNAME:
+        return
+
+    video = update.message.video
+    if not video:
+        await update.message.reply_text("Please send a video file.")
+        return
+
+    context.user_data["file_id"] = video.file_id
     context.user_data["user_id"] = update.message.chat_id
+    context.user_data["original_msg_id"] = update.message.message_id
+    context.user_data["original_caption"] = update.message.caption or ""
 
     keyboard = [
-        [InlineKeyboardButton("Compress this video ✅", callback_data="compress")],
-        [InlineKeyboardButton("Cancel the process ❌", callback_data="cancel")]
+        [InlineKeyboardButton("Compress ✅", callback_data="compress")],
+        [InlineKeyboardButton("Cancel ❌", callback_data="cancel")]
     ]
-    await update.message.reply_text(
-        "Video received. What would you like to do?",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await update.message.reply_text("Video received. What would you like to do?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -54,20 +58,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("cancel_run_"):
         run_id = data.split("_", 2)[2]
         url = f"https://api.github.com/repos/{REPO}/actions/runs/{run_id}/cancel"
-        headers = {
-            "Authorization": f"token {GITHUB_TOKEN}",
-            "Accept": "application/vnd.github+json"
-        }
+        headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
         resp = requests.post(url, headers=headers)
         if resp.status_code == 202:
             await query.edit_message_text("❌ Process cancelled by user.")
         else:
-            error_msg = resp.json().get("message", "Unknown error")
-            await query.edit_message_text(f"❌ Cancellation failed: {error_msg}")
+            await query.edit_message_text(f"❌ Cancellation failed: {resp.json().get('message')}")
         return
 
     if data == "cancel":
         await query.edit_message_text("❌ Process cancelled.")
+        context.user_data.clear()
         return
 
     if data == "compress":
@@ -79,88 +80,76 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("1080p", callback_data="quality_1080")],
             [InlineKeyboardButton("Cancel ❌", callback_data="cancel_q")]
         ]
-        await query.edit_message_text(
-            "Select the desired quality:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await query.edit_message_text("Select the desired quality:", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
     if data.startswith("quality_"):
         quality = data.split("_")[1]
-        fwd_msg_id = context.user_data.get("fwd_msg_id")
-        user_id = context.user_data.get("user_id")
-        original_msg_id = context.user_data.get("original_msg_id")
+        context.user_data["quality"] = quality
+        context.user_data["awaiting_name"] = True
+        await query.edit_message_text("📝 Send a name for the compressed file (or type `skip`):")
+        return
 
-        if not fwd_msg_id or not user_id or not original_msg_id:
-            await query.edit_message_text("Error: Missing video info.")
-            return
-
-        cancel_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Cancel ❌", callback_data="cancel_pending")]
-        ])
-        await query.edit_message_text(
-            "⏳ Triggering workflow...",
-            reply_markup=cancel_keyboard
-        )
-        progress_msg_id = query.message.message_id
-
-        url = f"https://api.github.com/repos/{REPO}/actions/workflows/{WF_FILE}/dispatches"
-        headers = {
-            "Authorization": f"token {GITHUB_TOKEN}",
-            "Accept": "application/vnd.github+json"
-        }
-        payload = {
-            "ref": "main",
-            "inputs": {
-                "channel_username": str(CHANNEL_USERNAME),
-                "fwd_message_id": str(fwd_msg_id),
-                "user_id": str(user_id),
-                "quality": quality,
-                "message_id": str(progress_msg_id),
-                "original_message_id": str(original_msg_id),
-                "bot_username": BOT_USERNAME       # <-- username for upload
-            }
-        }
-        resp = requests.post(url, json=payload, headers=headers)
-        if resp.status_code != 204:
-            await query.edit_message_text(f"❌ Workflow trigger failed: {resp.status_code} {resp.text}")
-            return
-
-        runs_url = f"https://api.github.com/repos/{REPO}/actions/runs?event=workflow_dispatch&per_page=1"
-        runs_resp = requests.get(runs_url, headers=headers)
-        run_id = None
-        if runs_resp.status_code == 200:
-            runs_data = runs_resp.json()
-            if runs_data["total_count"] > 0:
-                run_id = runs_data["workflow_runs"][0]["id"]
-
-        if run_id:
-            RUN_IDS[(user_id, progress_msg_id)] = run_id
-            new_keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("Cancel ❌", callback_data=f"cancel_run_{run_id}")]
-            ])
-            await query.edit_message_reply_markup(reply_markup=new_keyboard)
-
-    elif data == "cancel_q":
+    if data == "cancel_q":
         await query.edit_message_text("❌ Compression cancelled.")
+        context.user_data.clear()
+        return
+
+# ---------- Text handler for custom name ----------
+async def custom_name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.chat.username != CHANNEL_USERNAME:
+        return
+    if not context.user_data.get("awaiting_name"):
+        return
+
+    text = update.message.text.strip()
+    if text.lower() == "cancel":
+        await update.message.reply_text("❌ Process cancelled.")
+        context.user_data.clear()
+        return
+
+    custom_name = text if text.lower() != "skip" else "video"
+    context.user_data["custom_name"] = custom_name
+    context.user_data["awaiting_name"] = False
+
+    file_id = context.user_data["file_id"]
+    user_id = context.user_data["user_id"]
+    original_msg_id = context.user_data["original_msg_id"]
+    original_caption = context.user_data.get("original_caption", "")
+    quality = context.user_data["quality"]
+
+    # Send a progress message that the workflow will update
+    progress_msg = await update.message.reply_text("⏳ Triggering workflow...")
+    progress_msg_id = progress_msg.message_id
+
+    url = f"https://api.github.com/repos/{REPO}/actions/workflows/{WF_FILE}/dispatches"
+    headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
+    payload = {
+        "ref": "main",
+        "inputs": {
+            "file_id": file_id,
+            "channel_id": str(user_id),           # channel chat id
+            "quality": quality,
+            "message_id": str(progress_msg_id),
+            "original_message_id": str(original_msg_id),
+            "custom_name": custom_name,
+            "original_caption": original_caption
+        }
+    }
+    resp = requests.post(url, json=payload, headers=headers)
+    if resp.status_code != 204:
+        await progress_msg.edit_text(f"❌ Workflow trigger failed: {resp.status_code} {resp.text}")
 
 async def post_init(application: Application):
     me = await application.bot.get_me()
-    print(f"Bot started as @{me.username}")
-
-async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        msg = await context.bot.send_message(chat_id=f"@{CHANNEL_USERNAME}", text="Bot is alive!")
-        await update.message.reply_text(f"✅ Message sent to channel: {msg.message_id}")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
+    print(f"Frontend bot @{me.username} ready.")
 
 def main():
     app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("test", test))
     app.add_handler(MessageHandler(filters.VIDEO, video_handler))
     app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, custom_name_handler))
     app.run_polling()
 
 if __name__ == "__main__":
