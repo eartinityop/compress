@@ -9,7 +9,7 @@ REPO = "eartinityop/compress"
 WF_FILE = "compress.yml"
 FRONTEND_TOKEN = os.environ["FRONTEND_TOKEN"]               # GitHub PAT
 GROUP_CHAT_ID = int(os.environ["GROUP_CHAT_ID"])            # your group’s numeric ID
-WORKER_BOT_USERNAME = os.environ["WORKER_BOT_USERNAME"]     # without @ (e.g., "eartinitycompworker_bot")
+COMPRESS_CHANNEL_ID = int(os.environ["COMPRESS_CHANNEL_ID"])  # private channel ID (negative)
 
 # ---------- Health server for Render ----------
 class HealthHandler(BaseHTTPRequestHandler):
@@ -37,11 +37,11 @@ async def video_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Please send a video file.")
         return
 
-    # 1. Forward the video to the worker bot immediately (the worker bot now has its own copy)
-    forwarded = await update.message.forward(chat_id=f"@{WORKER_BOT_USERNAME}")
-    context.user_data["worker_msg_id"] = forwarded.message_id      # message ID in worker bot’s chat
+    # Forward the video to the private channel (both bots are admins there)
+    forwarded = await update.message.forward(chat_id=COMPRESS_CHANNEL_ID)
+    context.user_data["channel_msg_id"] = forwarded.message_id
 
-    # 2. Store original group info for the reply later
+    # Store original group info for the reply later
     context.user_data["original_msg_id"] = update.message.message_id
     context.user_data["chat_id"] = update.message.chat.id
     context.user_data["original_caption"] = update.message.caption or ""
@@ -117,7 +117,7 @@ async def custom_name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     chat_id = context.user_data["chat_id"]
     original_caption = context.user_data.get("original_caption", "")
     prompt_msg_id = context.user_data["prompt_msg_id"]
-    worker_msg_id = context.user_data["worker_msg_id"]        # forwarded message ID in worker bot’s chat
+    channel_msg_id = context.user_data["channel_msg_id"]
 
     # Edit prompt to “Workflow triggered…”
     await context.bot.edit_message_text(
@@ -134,7 +134,8 @@ async def custom_name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         "inputs": {
             "chat_id": str(chat_id),
             "original_message_id": str(original_msg_id),
-            "worker_msg_id": str(worker_msg_id),
+            "channel_msg_id": str(channel_msg_id),
+            "channel_id": str(COMPRESS_CHANNEL_ID),       # channel’s numeric ID
             "quality": quality,
             "custom_name": custom_name,
             "original_caption": original_caption
