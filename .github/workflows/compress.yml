@@ -1,4 +1,4 @@
-name: Video Compressor (Same Bot + Local API – Safe)
+name: Video Compressor (Final – Fixed Download)
 
 on:
   workflow_dispatch:
@@ -63,72 +63,86 @@ jobs:
       - name: Send progress message (same bot)
         id: progress
         run: |
-          API_URL="http://127.0.0.1:8081/bot${BOT_TOKEN}"
-          RESP=$(curl -s -X POST "$API_URL/sendMessage" \
+          BASE_URL="http://127.0.0.1:8081"
+          RESP=$(curl -s -X POST "${BASE_URL}/bot${BOT_TOKEN}/sendMessage" \
             -d "chat_id=$CHAT_ID" \
             -d "text=⏳ Processing started..." \
             -d "parse_mode=Markdown")
           echo "PROGRESS_MSG_ID=$(echo "$RESP" | jq -r '.result.message_id')" >> $GITHUB_ENV
 
-      - name: Download video (progress + speed every 7s, size check)
+      - name: Download video (fixed URL + local path support)
         id: download
         run: |
-          API_URL="http://127.0.0.1:8081/bot${BOT_TOKEN}"
-          FILE_PATH=$(curl -s "$API_URL/getFile?file_id=${{ github.event.inputs.file_id }}" | jq -r '.result.file_path')
+          BASE_URL="http://127.0.0.1:8081"
+          FILE_PATH=$(curl -s "${BASE_URL}/bot${BOT_TOKEN}/getFile?file_id=${{ github.event.inputs.file_id }}" | jq -r '.result.file_path')
           if [ -z "$FILE_PATH" ] || [ "$FILE_PATH" = "null" ]; then
-            curl -s -X POST "$API_URL/editMessageText" -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
+            curl -s -X POST "${BASE_URL}/bot${BOT_TOKEN}/editMessageText" \
+              -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
               -d "text=❌ Failed to get file path." -d "parse_mode=Markdown"
             exit 1
           fi
+
           OUTPUT="compress/original.mp4"
-          curl -# -L -o "$OUTPUT" "$API_URL/file/$FILE_PATH" 2>/tmp/download_progress.txt &
-          CURL_PID=$!
 
-          LAST_SIZE=0
-          LAST_TIME=$(date +%s)
+          # If the path is absolute (--local mode), copy directly
+          if [[ "$FILE_PATH" = /* ]]; then
+            cp "$FILE_PATH" "$OUTPUT"
+            curl -s -X POST "${BASE_URL}/bot${BOT_TOKEN}/editMessageText" \
+              -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
+              -d "text=✅ Download complete!" -d "parse_mode=Markdown"
+          else
+            # Standard relative path – download via HTTP with progress
+            FILE_URL="${BASE_URL}/file/bot${BOT_TOKEN}/${FILE_PATH}"
+            curl -# -L -o "$OUTPUT" "$FILE_URL" 2>/tmp/download_progress.txt &
+            CURL_PID=$!
 
-          while kill -0 $CURL_PID 2>/dev/null; do
-            sleep 7
-            if [ -f "$OUTPUT" ]; then
-              CURRENT_SIZE=$(stat -c%s "$OUTPUT" 2>/dev/null || echo 0)
-              NOW=$(date +%s)
-              ELAPSED=$(( NOW - LAST_TIME ))
-              if [ $ELAPSED -gt 0 ]; then
-                SPEED_BYTES=$(( (CURRENT_SIZE - LAST_SIZE) / ELAPSED ))
-                SPEED_MB=$(echo "scale=2; ${SPEED_BYTES}/1048576" | bc)
-              else
-                SPEED_MB="0"
+            LAST_SIZE=0
+            LAST_TIME=$(date +%s)
+
+            while kill -0 $CURL_PID 2>/dev/null; do
+              sleep 7
+              if [ -f "$OUTPUT" ]; then
+                CURRENT_SIZE=$(stat -c%s "$OUTPUT" 2>/dev/null || echo 0)
+                NOW=$(date +%s)
+                ELAPSED=$(( NOW - LAST_TIME ))
+                if [ $ELAPSED -gt 0 ]; then
+                  SPEED_BYTES=$(( (CURRENT_SIZE - LAST_SIZE) / ELAPSED ))
+                  SPEED_MB=$(echo "scale=2; ${SPEED_BYTES}/1048576" | bc)
+                else
+                  SPEED_MB="0"
+                fi
+                TOTAL_SIZE=$(grep -i "content-length" /tmp/download_progress.txt | tail -1 | awk '{print $2}' | tr -d '\r')
+                if [ -n "$TOTAL_SIZE" ] && [ "$TOTAL_SIZE" -gt 0 ]; then
+                  PERCENT=$(( CURRENT_SIZE * 100 / TOTAL_SIZE ))
+                  TOTAL_MB=$(echo "scale=2; $TOTAL_SIZE/1048576" | bc)
+                else
+                  PERCENT=0
+                  TOTAL_MB="?"
+                fi
+                CUR_MB=$(echo "scale=2; $CURRENT_SIZE/1048576" | bc)
+                BARS=20
+                FILLED=$(( PERCENT * BARS / 100 ))
+                BAR=$(printf "%0.s█" $(seq 1 $FILLED))
+                BAR+=$(printf "%0.s░" $(seq 1 $((BARS - FILLED))))
+                curl -s -X POST "${BASE_URL}/bot${BOT_TOKEN}/editMessageText" \
+                  -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
+                  -d "text=📥 Downloading... [${BAR}] ${PERCENT}%\n(${CUR_MB} / ${TOTAL_MB} MB) ⚡ ${SPEED_MB} MB/s" -d "parse_mode=Markdown"
+                LAST_SIZE=$CURRENT_SIZE
+                LAST_TIME=$NOW
               fi
-              TOTAL_SIZE=$(grep -i "content-length" /tmp/download_progress.txt | tail -1 | awk '{print $2}' | tr -d '\r')
-              if [ -n "$TOTAL_SIZE" ] && [ "$TOTAL_SIZE" -gt 0 ]; then
-                PERCENT=$(( CURRENT_SIZE * 100 / TOTAL_SIZE ))
-                TOTAL_MB=$(echo "scale=2; $TOTAL_SIZE/1048576" | bc)
-              else
-                PERCENT=0
-                TOTAL_MB="?"
-              fi
-              CUR_MB=$(echo "scale=2; $CURRENT_SIZE/1048576" | bc)
-              BARS=20
-              FILLED=$(( PERCENT * BARS / 100 ))
-              BAR=$(printf "%0.s█" $(seq 1 $FILLED))
-              BAR+=$(printf "%0.s░" $(seq 1 $((BARS - FILLED))))
-              curl -s -X POST "$API_URL/editMessageText" -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
-                -d "text=📥 Downloading... [${BAR}] ${PERCENT}%\n(${CUR_MB} / ${TOTAL_MB} MB) ⚡ ${SPEED_MB} MB/s" -d "parse_mode=Markdown"
-
-              LAST_SIZE=$CURRENT_SIZE
-              LAST_TIME=$NOW
+            done
+            wait $CURL_PID
+            FINAL_SIZE=$(stat -c%s "$OUTPUT" 2>/dev/null || echo 0)
+            if [ "$FINAL_SIZE" -lt 1024 ]; then
+              curl -s -X POST "${BASE_URL}/bot${BOT_TOKEN}/editMessageText" \
+                -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
+                -d "text=❌ Download failed – file too small (${FINAL_SIZE} bytes)." -d "parse_mode=Markdown"
+              exit 1
             fi
-          done
-          wait $CURL_PID
-          # Check actual downloaded size
-          FINAL_SIZE=$(stat -c%s "$OUTPUT" 2>/dev/null || echo 0)
-          if [ "$FINAL_SIZE" -lt 1024 ]; then
-            curl -s -X POST "$API_URL/editMessageText" -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
-              -d "text=❌ Download failed – file too small (${FINAL_SIZE} bytes)." -d "parse_mode=Markdown"
-            exit 1
+            curl -s -X POST "${BASE_URL}/bot${BOT_TOKEN}/editMessageText" \
+              -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
+              -d "text=✅ Download complete!" -d "parse_mode=Markdown"
           fi
-          curl -s -X POST "$API_URL/editMessageText" -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
-            -d "text=✅ Download complete!" -d "parse_mode=Markdown"
 
       - name: Detect format and rename (only if file is valid)
         if: success()
@@ -142,8 +156,9 @@ jobs:
       - name: Compress video
         id: compress
         run: |
-          API_URL="http://127.0.0.1:8081/bot${BOT_TOKEN}"
-          curl -s -X POST "$API_URL/editMessageText" -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
+          BASE_URL="http://127.0.0.1:8081"
+          curl -s -X POST "${BASE_URL}/bot${BOT_TOKEN}/editMessageText" \
+            -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
             -d "text=🎞 Compressing to ${QUALITY}p..." -d "parse_mode=Markdown"
           echo "COMPRESS_START=$(date +%s)" >> $GITHUB_ENV
 
@@ -159,11 +174,13 @@ jobs:
           echo "COMPRESSED_NAME=${FINAL_NAME}" >> $GITHUB_ENV
 
           if ffmpeg -y -i "$INPUT" -vf "scale=-2:${QUALITY}" -c:v libx264 -preset fast -crf 23 -c:a aac -b:a 128k "compress/${FINAL_NAME}" 2>/tmp/ffmpeg.log; then
-            curl -s -X POST "$API_URL/editMessageText" -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
+            curl -s -X POST "${BASE_URL}/bot${BOT_TOKEN}/editMessageText" \
+              -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
               -d "text=✅ Compressed successfully!" -d "parse_mode=Markdown"
           else
             FFLOG=$(tail -n 20 /tmp/ffmpeg.log | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))")
-            curl -s -X POST "$API_URL/editMessageText" -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
+            curl -s -X POST "${BASE_URL}/bot${BOT_TOKEN}/editMessageText" \
+              -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
               -d "text=❌ Compression failed! \`\`\`${FFLOG}\`\`\`" -d "parse_mode=Markdown"
             exit 1
           fi
@@ -180,7 +197,7 @@ jobs:
           COMPRESSED_NAME: ${{ env.COMPRESSED_NAME }}
           COMPRESS_START: ${{ env.COMPRESS_START }}
         run: |
-          API_URL="http://127.0.0.1:8081/bot${BOT_TOKEN}"
+          BASE_URL="http://127.0.0.1:8081"
           FILE="compress/${COMPRESSED_NAME}"
           [ ! -f "$FILE" ] && exit 1
 
@@ -191,7 +208,7 @@ jobs:
           CAPTION="Quality: ${QUALITY}p | Time: ${MINS}m ${SECS}s"
           [ -n "${ORIGINAL_CAPTION}" ] && CAPTION="${ORIGINAL_CAPTION} - ${CAPTION}"
 
-          curl -s -X POST "$API_URL/sendVideo" \
+          curl -s -X POST "${BASE_URL}/bot${BOT_TOKEN}/sendVideo" \
             -F "chat_id=$CHAT_ID" \
             -F "video=@$FILE" \
             -F "caption=$CAPTION" \
@@ -199,10 +216,12 @@ jobs:
             -F "parse_mode=Markdown" > /tmp/send_resp.json
 
           if grep -q '"ok":true' /tmp/send_resp.json; then
-            curl -s -X POST "$API_URL/deleteMessage" -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID"
+            curl -s -X POST "${BASE_URL}/bot${BOT_TOKEN}/deleteMessage" \
+              -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID"
           else
             ERROR=$(jq -r '.description' /tmp/send_resp.json)
-            curl -s -X POST "$API_URL/editMessageText" -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
+            curl -s -X POST "${BASE_URL}/bot${BOT_TOKEN}/editMessageText" \
+              -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
               -d "text=❌ Upload failed: $ERROR" -d "parse_mode=Markdown"
             exit 1
           fi
