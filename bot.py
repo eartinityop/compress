@@ -1,4 +1,4 @@
-import os, requests, threading, sys, logging
+import os, requests, threading, sys, logging, asyncio
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
@@ -8,7 +8,7 @@ logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 REPO = "eartinityop/compress"
 WF_FILE = "compress.yml"
 FRONTEND_TOKEN = os.environ["FRONTEND_TOKEN"]           # your GitHub PAT
-GROUP_CHAT_ID = int(os.environ["GROUP_CHAT_ID"])       # your group's numeric ID (e.g., -1001234567890)
+GROUP_CHAT_ID = int(os.environ["GROUP_CHAT_ID"])       # your group's numeric ID
 
 # ---------- Health server for Render ----------
 class HealthHandler(BaseHTTPRequestHandler):
@@ -37,9 +37,9 @@ async def video_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Please send a video file.")
         return
 
-    context.user_data["file_id"] = video.file_id
-    context.user_data["chat_id"] = update.message.chat.id
+    # Store video message ID (the worker bot will fetch this message later)
     context.user_data["original_msg_id"] = update.message.message_id
+    context.user_data["chat_id"] = update.message.chat.id
     context.user_data["original_caption"] = update.message.caption or ""
 
     keyboard = [
@@ -53,6 +53,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
 
+    # ---------- Cancel a running workflow ----------
     if data.startswith("cancel_run_"):
         run_id = data.split("_", 2)[2]
         url = f"https://api.github.com/repos/{REPO}/actions/runs/{run_id}/cancel"
@@ -61,7 +62,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if resp.status_code == 202:
             await query.edit_message_text("❌ Process cancelled by user.")
         else:
-            await query.edit_message_text(f"❌ Cancellation failed: {resp.json().get('message')}")
+            error_msg = resp.json().get("message", "Unknown error")
+            await query.edit_message_text(f"❌ Cancellation failed: {error_msg}")
         return
 
     if data == "cancel":
@@ -69,6 +71,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         return
 
+    # ---------- Show quality options ----------
     if data == "compress":
         keyboard = [
             [InlineKeyboardButton("240p", callback_data="quality_240"),
@@ -81,10 +84,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Select the desired quality:", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
+    # ---------- Quality selected → ask for custom name ----------
     if data.startswith("quality_"):
         quality = data.split("_")[1]
         context.user_data["quality"] = quality
-        context.user_data["awaiting_name"] = True
+        # Store the message ID of this prompt so we can edit it later
+        context.user_data["prompt_msg_id"] = query.message.message_id
         await query.edit_message_text("📝 Send a name for the compressed file (or type `skip`):")
         return
 
@@ -93,10 +98,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         return
 
+# ---------- Text handler for custom name ----------
 async def custom_name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Only react in the correct group and when we're actually waiting for a name
     if update.message.chat.id != GROUP_CHAT_ID:
         return
-    if not context.user_data.get("awaiting_name"):
+    if "quality" not in context.user_data or "prompt_msg_id" not in context.user_data:
         return
 
     text = update.message.text.strip()
@@ -106,39 +113,50 @@ async def custom_name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     custom_name = text if text.lower() != "skip" else "video"
-    context.user_data["custom_name"] = custom_name
-    context.user_data["awaiting_name"] = False
 
-    file_id = context.user_data["file_id"]
-    chat_id = context.user_data["chat_id"]
-    original_msg_id = context.user_data["original_msg_id"]
-    original_caption = context.user_data.get("original_caption", "")
+    # Delete the user's name message immediately
+    await update.message.delete()
+
     quality = context.user_data["quality"]
+    original_msg_id = context.user_data["original_msg_id"]
+    chat_id = context.user_data["chat_id"]
+    original_caption = context.user_data["original_caption"]
+    prompt_msg_id = context.user_data["prompt_msg_id"]
 
-    # Just tell the user that the workflow has been triggered.
-    # The worker bot will send its own progress message.
-    await update.message.reply_text("⏳ Workflow triggered. The worker bot will update you.")
+    # Edit the prompt message to “Workflow triggered…”
+    await context.bot.edit_message_text(
+        chat_id=chat_id,
+        message_id=prompt_msg_id,
+        text="⏳ Workflow triggered. The worker bot will update you."
+    )
 
+    # Trigger the GitHub Actions workflow (pass original message ID, not file_id)
     url = f"https://api.github.com/repos/{REPO}/actions/workflows/{WF_FILE}/dispatches"
     headers = {"Authorization": f"token {FRONTEND_TOKEN}", "Accept": "application/vnd.github+json"}
     payload = {
         "ref": "main",
         "inputs": {
-            "file_id": file_id,
             "chat_id": str(chat_id),
-            "quality": quality,
             "original_message_id": str(original_msg_id),
+            "quality": quality,
             "custom_name": custom_name,
             "original_caption": original_caption
         }
     }
     resp = requests.post(url, json=payload, headers=headers)
     if resp.status_code != 204:
-        await update.message.reply_text(f"❌ Workflow trigger failed: {resp.status_code} {resp.text}")
-    
-    await asyncio.sleep(5)
-    await context.bot.delete_message(chat_id=update.message.chat_id, message_id=update.message.message_id)
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=prompt_msg_id,
+            text=f"❌ Workflow trigger failed: {resp.status_code} {resp.text}"
+        )
+        context.user_data.clear()
+        return
 
+    # Wait 5 seconds, then delete the prompt message
+    await asyncio.sleep(5)
+    await context.bot.delete_message(chat_id=chat_id, message_id=prompt_msg_id)
+    context.user_data.clear()
 
 async def post_init(application: Application):
     me = await application.bot.get_me()
@@ -149,6 +167,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.VIDEO, video_handler))
     app.add_handler(CallbackQueryHandler(button_handler))
+    # This handler catches text messages when we're waiting for a custom name
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, custom_name_handler))
     app.run_polling()
 
