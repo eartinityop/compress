@@ -1,4 +1,4 @@
-name: Video Compressor (Final – Fixed Download)
+name: Video Compressor (Final – Local Progress + Metadata Fix)
 
 on:
   workflow_dispatch:
@@ -70,7 +70,7 @@ jobs:
             -d "parse_mode=Markdown")
           echo "PROGRESS_MSG_ID=$(echo "$RESP" | jq -r '.result.message_id')" >> $GITHUB_ENV
 
-      - name: Download video (fixed URL + local path support)
+      - name: Download video (local progress bar added)
         id: download
         run: |
           BASE_URL="http://127.0.0.1:8081"
@@ -84,14 +84,52 @@ jobs:
 
           OUTPUT="compress/original.mp4"
 
-          # If the path is absolute (--local mode), copy directly
           if [[ "$FILE_PATH" = /* ]]; then
-            cp "$FILE_PATH" "$OUTPUT"
-            curl -s -X POST "${BASE_URL}/bot${BOT_TOKEN}/editMessageText" \
-              -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
-              -d "text=✅ Download complete!" -d "parse_mode=Markdown"
+            # ----- Local mode: copy with progress simulation -----
+            TOTAL_SIZE=$(stat -c%s "$FILE_PATH")
+            # Start background copy (dd + monitoring)
+            dd if="$FILE_PATH" of="$OUTPUT" bs=4M status=none &
+            COPY_PID=$!
+
+            LAST_SIZE=0
+            LAST_TIME=$(date +%s)
+
+            while kill -0 $COPY_PID 2>/dev/null; do
+              sleep 7
+              CURRENT_SIZE=$(stat -c%s "$OUTPUT" 2>/dev/null || echo 0)
+              NOW=$(date +%s)
+              ELAPSED=$(( NOW - LAST_TIME ))
+              if [ $ELAPSED -gt 0 ]; then
+                SPEED_BYTES=$(( (CURRENT_SIZE - LAST_SIZE) / ELAPSED ))
+                SPEED_MB=$(echo "scale=2; ${SPEED_BYTES}/1048576" | bc)
+              else
+                SPEED_MB="0"
+              fi
+              PERCENT=$(( CURRENT_SIZE * 100 / TOTAL_SIZE ))
+              TOTAL_MB=$(echo "scale=2; $TOTAL_SIZE/1048576" | bc)
+              CUR_MB=$(echo "scale=2; $CURRENT_SIZE/1048576" | bc)
+              BARS=20
+              FILLED=$(( PERCENT * BARS / 100 ))
+              BAR=$(printf "%0.s█" $(seq 1 $FILLED))
+              BAR+=$(printf "%0.s░" $(seq 1 $((BARS - FILLED))))
+              curl -s -X POST "${BASE_URL}/bot${BOT_TOKEN}/editMessageText" \
+                -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
+                -d "text=📥 Downloading... [${BAR}] ${PERCENT}%\n(${CUR_MB} / ${TOTAL_MB} MB) ⚡ ${SPEED_MB} MB/s" \
+                -d "parse_mode=Markdown"
+              LAST_SIZE=$CURRENT_SIZE
+              LAST_TIME=$NOW
+            done
+            wait $COPY_PID
+
+            FINAL_SIZE=$(stat -c%s "$OUTPUT" 2>/dev/null || echo 0)
+            if [ "$FINAL_SIZE" -lt 1024 ]; then
+              curl -s -X POST "${BASE_URL}/bot${BOT_TOKEN}/editMessageText" \
+                -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
+                -d "text=❌ Download failed – file too small (${FINAL_SIZE} bytes)." -d "parse_mode=Markdown"
+              exit 1
+            fi
           else
-            # Standard relative path – download via HTTP with progress
+            # ----- Remote mode: standard curl download -----
             FILE_URL="${BASE_URL}/file/bot${BOT_TOKEN}/${FILE_PATH}"
             curl -# -L -o "$OUTPUT" "$FILE_URL" 2>/tmp/download_progress.txt &
             CURL_PID=$!
@@ -126,7 +164,8 @@ jobs:
                 BAR+=$(printf "%0.s░" $(seq 1 $((BARS - FILLED))))
                 curl -s -X POST "${BASE_URL}/bot${BOT_TOKEN}/editMessageText" \
                   -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
-                  -d "text=📥 Downloading... [${BAR}] ${PERCENT}%\n(${CUR_MB} / ${TOTAL_MB} MB) ⚡ ${SPEED_MB} MB/s" -d "parse_mode=Markdown"
+                  -d "text=📥 Downloading... [${BAR}] ${PERCENT}%\n(${CUR_MB} / ${TOTAL_MB} MB) ⚡ ${SPEED_MB} MB/s" \
+                  -d "parse_mode=Markdown"
                 LAST_SIZE=$CURRENT_SIZE
                 LAST_TIME=$NOW
               fi
@@ -139,10 +178,11 @@ jobs:
                 -d "text=❌ Download failed – file too small (${FINAL_SIZE} bytes)." -d "parse_mode=Markdown"
               exit 1
             fi
-            curl -s -X POST "${BASE_URL}/bot${BOT_TOKEN}/editMessageText" \
-              -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
-              -d "text=✅ Download complete!" -d "parse_mode=Markdown"
           fi
+
+          curl -s -X POST "${BASE_URL}/bot${BOT_TOKEN}/editMessageText" \
+            -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
+            -d "text=✅ Download complete!" -d "parse_mode=Markdown"
 
       - name: Detect format and rename (only if file is valid)
         if: success()
@@ -153,7 +193,7 @@ jobs:
             echo "Renamed to original.mkv"
           fi
 
-      - name: Compress video
+      - name: Compress video (with metadata fix)
         id: compress
         run: |
           BASE_URL="http://127.0.0.1:8081"
@@ -173,7 +213,13 @@ jobs:
           FINAL_NAME="${SAFE_NAME}_${QUALITY}p.mp4"
           echo "COMPRESSED_NAME=${FINAL_NAME}" >> $GITHUB_ENV
 
-          if ffmpeg -y -i "$INPUT" -vf "scale=-2:${QUALITY}" -c:v libx264 -preset fast -crf 23 -c:a aac -b:a 128k "compress/${FINAL_NAME}" 2>/tmp/ffmpeg.log; then
+          if ffmpeg -y -i "$INPUT" \
+             -map_metadata 0 \
+             -movflags +faststart \
+             -vf "scale=-2:${QUALITY}" \
+             -c:v libx264 -preset fast -crf 23 \
+             -c:a aac -b:a 128k \
+             "compress/${FINAL_NAME}" 2>/tmp/ffmpeg.log; then
             curl -s -X POST "${BASE_URL}/bot${BOT_TOKEN}/editMessageText" \
               -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
               -d "text=✅ Compressed successfully!" -d "parse_mode=Markdown"
