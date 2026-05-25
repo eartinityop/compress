@@ -1,4 +1,4 @@
-name: Video Compressor (Final – Filename Now Works)
+name: Video Compressor (Final – Caption Name + Thumbnail)
 
 on:
   workflow_dispatch:
@@ -249,13 +249,13 @@ jobs:
           path: compress/${{ env.COMPRESSED_NAME }}
           retention-days: 7
 
-      - name: Send compressed file to group (reply, same bot, duration + custom filename FIXED)
+      - name: Send compressed file to group (reply, same bot, caption shows custom name)
         env:
           COMPRESSED_NAME: ${{ env.COMPRESSED_NAME }}
           COMPRESS_START: ${{ env.COMPRESS_START }}
         run: |
           BASE_URL="http://127.0.0.1:8081"
-          FILE="compress/${COMPRESSED_NAME}"   # file already named Name.mp4
+          FILE="compress/${COMPRESSED_NAME}"
           [ ! -f "$FILE" ] && exit 1
 
           DURATION=$(ffprobe -v error -show_entries format=duration \
@@ -266,13 +266,16 @@ jobs:
           ELAPSED=$(( COMPRESS_END - COMPRESS_START ))
           MINS=$(( ELAPSED / 60 ))
           SECS=$(( ELAPSED % 60 ))
-          CAPTION="Quality: ${QUALITY}p | Time: ${MINS}m ${SECS}s"
-          [ -n "${ORIGINAL_CAPTION}" ] && CAPTION="${ORIGINAL_CAPTION} - ${CAPTION}"
 
-          # ✅ FIXED: explicit MIME type + filename ensures Telegram displays the custom name
+          # ✅ Caption now includes the custom name
+          CAPTION="${COMPRESSED_NAME} | Quality: ${QUALITY}p | Time: ${MINS}m ${SECS}s"
+          if [ -n "${ORIGINAL_CAPTION}" ]; then
+            CAPTION="${ORIGINAL_CAPTION} - ${CAPTION}"
+          fi
+
           curl -s -X POST "${BASE_URL}/bot${BOT_TOKEN}/sendVideo" \
             -F "chat_id=$CHAT_ID" \
-            -F "video=@$FILE;type=video/mp4;filename=${COMPRESSED_NAME}" \
+            -F "video=@$FILE" \
             -F "duration=$DURATION" \
             -F "supports_streaming=true" \
             -F "caption=$CAPTION" \
