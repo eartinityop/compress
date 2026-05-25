@@ -1,22 +1,26 @@
-name: Video Compressor (Channel Forwarding – Fixed)
+name: Video Compressor (Same Bot + Local API)
 
 on:
   workflow_dispatch:
     inputs:
+      file_id:
+        description: 'file_id of the video (belongs to the same bot)'
+        required: true
       chat_id:
+        description: 'Group chat ID'
         required: true
       original_message_id:
-        required: true
-      channel_msg_id:
-        required: true
-      channel_id:
+        description: 'Original message ID for reply'
         required: true
       quality:
+        description: 'Target height (240/360/480/720/1080)'
         required: true
       custom_name:
+        description: 'Custom file name'
         required: false
         default: 'video'
       original_caption:
+        description: 'Original video caption'
         required: false
         default: ''
 
@@ -26,13 +30,11 @@ jobs:
     timeout-minutes: 180
 
     env:
-      WORKER_BOT_TOKEN: ${{ secrets.WORKER_BOT_TOKEN }}
+      BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}          # same as frontend bot
       API_ID: ${{ secrets.API_ID }}
       API_HASH: ${{ secrets.API_HASH }}
       CHAT_ID: ${{ github.event.inputs.chat_id }}
       ORIGINAL_MSG_ID: ${{ github.event.inputs.original_message_id }}
-      CHANNEL_MSG_ID: ${{ github.event.inputs.channel_msg_id }}
-      CHANNEL_ID: ${{ github.event.inputs.channel_id }}
       QUALITY: ${{ github.event.inputs.quality }}
       ORIGINAL_CAPTION: ${{ github.event.inputs.original_caption }}
       CUSTOM_NAME: ${{ github.event.inputs.custom_name }}
@@ -58,33 +60,20 @@ jobs:
             sleep 1
           done
 
-      - name: Send progress message (worker bot)
+      - name: Send progress message (same bot)
         id: progress
         run: |
-          API_URL="http://127.0.0.1:8081/bot${WORKER_BOT_TOKEN}"
+          API_URL="http://127.0.0.1:8081/bot${BOT_TOKEN}"
           RESP=$(curl -s -X POST "$API_URL/sendMessage" \
             -d "chat_id=$CHAT_ID" \
             -d "text=⏳ Processing started..." \
             -d "parse_mode=Markdown")
           echo "PROGRESS_MSG_ID=$(echo "$RESP" | jq -r '.result.message_id')" >> $GITHUB_ENV
 
-      - name: Retrieve video from channel (worker bot)
+      - name: Download video via local API (same bot, valid file_id)
         run: |
-          API_URL="http://127.0.0.1:8081/bot${WORKER_BOT_TOKEN}"
-          # Fetch the forwarded message from the channel using its chat ID (CHANNEL_ID)
-          MSG=$(curl -s "$API_URL/getMessage?chat_id=$CHANNEL_ID&message_id=$CHANNEL_MSG_ID")
-          FILE_ID=$(echo "$MSG" | jq -r '.result.video.file_id')
-          if [ -z "$FILE_ID" ] || [ "$FILE_ID" = "null" ]; then
-            curl -s -X POST "$API_URL/editMessageText" -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
-              -d "text=❌ Could not retrieve video from channel message." -d "parse_mode=Markdown"
-            exit 1
-          fi
-          echo "FILE_ID=$FILE_ID" >> $GITHUB_ENV
-
-      - name: Download video
-        run: |
-          API_URL="http://127.0.0.1:8081/bot${WORKER_BOT_TOKEN}"
-          FILE_PATH=$(curl -s "$API_URL/getFile?file_id=$FILE_ID" | jq -r '.result.file_path')
+          API_URL="http://127.0.0.1:8081/bot${BOT_TOKEN}"
+          FILE_PATH=$(curl -s "$API_URL/getFile?file_id=${{ github.event.inputs.file_id }}" | jq -r '.result.file_path')
           if [ -z "$FILE_PATH" ] || [ "$FILE_PATH" = "null" ]; then
             curl -s -X POST "$API_URL/editMessageText" -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
               -d "text=❌ Failed to get file path." -d "parse_mode=Markdown"
@@ -120,18 +109,20 @@ jobs:
 
       - name: Verify download
         run: |
-          API_URL="http://127.0.0.1:8081/bot${WORKER_BOT_TOKEN}"
+          API_URL="http://127.0.0.1:8081/bot${BOT_TOKEN}"
           if [ ! -f compress/original.mp4 ]; then
-            curl -s -X POST "$API_URL/editMessageText" -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" -d "text=❌ Verification failed." -d "parse_mode=Markdown"
+            curl -s -X POST "$API_URL/editMessageText" -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
+              -d "text=❌ Verification failed." -d "parse_mode=Markdown"
             exit 1
           fi
           SIZE=$(du -sh compress/original.mp4 | cut -f1)
-          curl -s -X POST "$API_URL/editMessageText" -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" -d "text=✅ File verified (${SIZE})" -d "parse_mode=Markdown"
+          curl -s -X POST "$API_URL/editMessageText" -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
+            -d "text=✅ File verified (${SIZE})" -d "parse_mode=Markdown"
 
       - name: Compress video
         id: compress
         run: |
-          API_URL="http://127.0.0.1:8081/bot${WORKER_BOT_TOKEN}"
+          API_URL="http://127.0.0.1:8081/bot${BOT_TOKEN}"
           curl -s -X POST "$API_URL/editMessageText" -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
             -d "text=🎞 Compressing to ${QUALITY}p..." -d "parse_mode=Markdown"
           echo "COMPRESS_START=$(date +%s)" >> $GITHUB_ENV
@@ -158,12 +149,12 @@ jobs:
           path: compress/${{ env.COMPRESSED_NAME }}
           retention-days: 7
 
-      - name: Send compressed file to group (as reply)
+      - name: Send compressed file to group (reply, same bot)
         env:
           COMPRESSED_NAME: ${{ env.COMPRESSED_NAME }}
           COMPRESS_START: ${{ env.COMPRESS_START }}
         run: |
-          API_URL="http://127.0.0.1:8081/bot${WORKER_BOT_TOKEN}"
+          API_URL="http://127.0.0.1:8081/bot${BOT_TOKEN}"
           FILE="compress/${COMPRESSED_NAME}"
           [ ! -f "$FILE" ] && exit 1
 
