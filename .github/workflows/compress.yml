@@ -118,7 +118,7 @@ jobs:
               BAR+=$(printf "%0.s░" $(seq 1 $((BARS - FILLED))))
               curl -s -X POST "${BASE_URL}/bot${BOT_TOKEN}/editMessageText" \
                 -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
-                -d "text=📥 Downloading... [${BAR}] ${PERCENT}%\n(${CUR_MB} / ${TOTAL_MB} MB) ⚡ ${SPEED_MB} MB/s" \
+                -d "text=📥 Downloading... [${BAR}] ${PERCENT}%$'\n'(${CUR_MB} / ${TOTAL_MB} MB) ⚡ ${SPEED_MB} MB/s" \
                 -d "parse_mode=Markdown"
               LAST_SIZE=$CURRENT_SIZE
               LAST_TIME=$NOW
