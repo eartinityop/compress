@@ -7,9 +7,8 @@ logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 
 REPO = "eartinityop/compress"
 WF_FILE = "compress.yml"
-FRONTEND_TOKEN = os.environ["FRONTEND_TOKEN"]               # GitHub PAT
-GROUP_CHAT_ID = int(os.environ["GROUP_CHAT_ID"])            # your group’s numeric ID
-COMPRESS_CHANNEL_ID = int(os.environ["COMPRESS_CHANNEL_ID"])  # private channel ID (negative)
+FRONTEND_TOKEN = os.environ["FRONTEND_TOKEN"]        # GitHub PAT
+GROUP_CHAT_ID = int(os.environ["GROUP_CHAT_ID"])     # your group’s ID
 
 # ---------- Health server for Render ----------
 class HealthHandler(BaseHTTPRequestHandler):
@@ -37,11 +36,8 @@ async def video_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Please send a video file.")
         return
 
-    # Forward the video to the private channel (both bots are admins there)
-    forwarded = await update.message.forward(chat_id=COMPRESS_CHANNEL_ID)
-    context.user_data["channel_msg_id"] = forwarded.message_id
-
-    # Store original group info for the reply later
+    # Store file_id and message IDs
+    context.user_data["file_id"] = video.file_id          # <-- this is valid for this bot
     context.user_data["original_msg_id"] = update.message.message_id
     context.user_data["chat_id"] = update.message.chat.id
     context.user_data["original_caption"] = update.message.caption or ""
@@ -110,32 +106,31 @@ async def custom_name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     custom_name = text if text.lower() != "skip" else "video"
-    await update.message.delete()        # delete user’s name message
+    await update.message.delete()
 
+    # Retrieve all stored data
+    file_id = context.user_data["file_id"]
     quality = context.user_data["quality"]
     original_msg_id = context.user_data["original_msg_id"]
     chat_id = context.user_data["chat_id"]
     original_caption = context.user_data.get("original_caption", "")
     prompt_msg_id = context.user_data["prompt_msg_id"]
-    channel_msg_id = context.user_data["channel_msg_id"]
 
-    # Edit prompt to “Workflow triggered…”
     await context.bot.edit_message_text(
         chat_id=chat_id,
         message_id=prompt_msg_id,
-        text="⏳ Workflow triggered. The worker bot will update you."
+        text="⏳ Workflow triggered. Processing will begin shortly."
     )
 
-    # Trigger the GitHub workflow
+    # Trigger GitHub Actions workflow
     url = f"https://api.github.com/repos/{REPO}/actions/workflows/{WF_FILE}/dispatches"
     headers = {"Authorization": f"token {FRONTEND_TOKEN}", "Accept": "application/vnd.github+json"}
     payload = {
         "ref": "main",
         "inputs": {
+            "file_id": file_id,
             "chat_id": str(chat_id),
             "original_message_id": str(original_msg_id),
-            "channel_msg_id": str(channel_msg_id),
-            "channel_id": str(COMPRESS_CHANNEL_ID),       # channel’s numeric ID
             "quality": quality,
             "custom_name": custom_name,
             "original_caption": original_caption
@@ -157,7 +152,7 @@ async def custom_name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def post_init(application: Application):
     me = await application.bot.get_me()
-    print(f"Frontend bot @{me.username} ready.")
+    print(f"Bot @{me.username} ready.")
 
 def main():
     app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).post_init(post_init).build()
