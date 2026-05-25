@@ -7,9 +7,8 @@ logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 
 REPO = "eartinityop/compress"
 WF_FILE = "compress.yml"
-# ✅ Renamed to FRONTEND_TOKEN to avoid any conflict
-FRONTEND_TOKEN = os.environ["FRONTEND_TOKEN"]   # Your GitHub PAT (repo + workflow scopes)
-CHANNEL_USERNAME = "eartvidcomp"       # Channel where you interact
+FRONTEND_TOKEN = os.environ["FRONTEND_TOKEN"]           # your GitHub PAT
+GROUP_CHAT_ID = int(os.environ["GROUP_CHAT_ID"])       # your group's numeric ID (e.g., -1001234567890)
 
 # ---------- Health server for Render ----------
 class HealthHandler(BaseHTTPRequestHandler):
@@ -25,12 +24,12 @@ def start_health_server():
 # -----------------------------------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.chat.username != CHANNEL_USERNAME:
+    if update.message.chat.id != GROUP_CHAT_ID:
         return
     await update.message.reply_text("👋 Send me a video to compress. I'll ask for quality and a custom name.")
 
 async def video_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.chat.username != CHANNEL_USERNAME:
+    if update.message.chat.id != GROUP_CHAT_ID:
         return
 
     video = update.message.video
@@ -39,7 +38,7 @@ async def video_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     context.user_data["file_id"] = video.file_id
-    context.user_data["user_id"] = update.message.chat_id
+    context.user_data["chat_id"] = update.message.chat.id
     context.user_data["original_msg_id"] = update.message.message_id
     context.user_data["original_caption"] = update.message.caption or ""
 
@@ -54,7 +53,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
 
-    # Cancel a running workflow (uses FRONTEND_TOKEN)
     if data.startswith("cancel_run_"):
         run_id = data.split("_", 2)[2]
         url = f"https://api.github.com/repos/{REPO}/actions/runs/{run_id}/cancel"
@@ -95,9 +93,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         return
 
-# ---------- Text handler for custom name ----------
 async def custom_name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.chat.username != CHANNEL_USERNAME:
+    if update.message.chat.id != GROUP_CHAT_ID:
         return
     if not context.user_data.get("awaiting_name"):
         return
@@ -113,14 +110,14 @@ async def custom_name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data["awaiting_name"] = False
 
     file_id = context.user_data["file_id"]
-    user_id = context.user_data["user_id"]
+    chat_id = context.user_data["chat_id"]
     original_msg_id = context.user_data["original_msg_id"]
     original_caption = context.user_data.get("original_caption", "")
     quality = context.user_data["quality"]
 
-    # Send a progress message that the workflow will update
-    progress_msg = await update.message.reply_text("⏳ Triggering workflow...")
-    progress_msg_id = progress_msg.message_id
+    # Just tell the user that the workflow has been triggered.
+    # The worker bot will send its own progress message.
+    await update.message.reply_text("⏳ Workflow triggered. The worker bot will update you.")
 
     url = f"https://api.github.com/repos/{REPO}/actions/workflows/{WF_FILE}/dispatches"
     headers = {"Authorization": f"token {FRONTEND_TOKEN}", "Accept": "application/vnd.github+json"}
@@ -128,9 +125,8 @@ async def custom_name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         "ref": "main",
         "inputs": {
             "file_id": file_id,
-            "channel_id": str(user_id),           # channel chat id
+            "chat_id": str(chat_id),
             "quality": quality,
-            "message_id": str(progress_msg_id),
             "original_message_id": str(original_msg_id),
             "custom_name": custom_name,
             "original_caption": original_caption
@@ -138,7 +134,7 @@ async def custom_name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     }
     resp = requests.post(url, json=payload, headers=headers)
     if resp.status_code != 204:
-        await progress_msg.edit_text(f"❌ Workflow trigger failed: {resp.status_code} {resp.text}")
+        await update.message.reply_text(f"❌ Workflow trigger failed: {resp.status_code} {resp.text}")
 
 async def post_init(application: Application):
     me = await application.bot.get_me()
