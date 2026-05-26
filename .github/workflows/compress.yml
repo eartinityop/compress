@@ -1,4 +1,6 @@
-name: Video Compressor (Final – Caption Name + Thumbnail)
+name: Video Compressor (Final – Caption Fix + Thumbnail + Dynamic Name)
+
+run-name: Compress ${{ inputs.custom_name }} to ${{ inputs.quality }}p
 
 on:
   workflow_dispatch:
@@ -20,7 +22,7 @@ on:
         required: false
         default: 'video'
       original_caption:
-        description: 'Original video caption'
+        description: 'Original video caption (ignored)'
         required: false
         default: ''
 
@@ -30,13 +32,12 @@ jobs:
     timeout-minutes: 180
 
     env:
-      BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}          # same as the frontend bot
+      BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       API_ID: ${{ secrets.API_ID }}
       API_HASH: ${{ secrets.API_HASH }}
       CHAT_ID: ${{ github.event.inputs.chat_id }}
       ORIGINAL_MSG_ID: ${{ github.event.inputs.original_message_id }}
       QUALITY: ${{ github.event.inputs.quality }}
-      ORIGINAL_CAPTION: ${{ github.event.inputs.original_caption }}
       CUSTOM_NAME: ${{ github.event.inputs.custom_name }}
       BINARY_URL: "https://github.com/eartinityop/compress/releases/download/botapi-binary/telegram-bot-api-linux-amd64"
 
@@ -85,7 +86,6 @@ jobs:
           OUTPUT="compress/original.mp4"
 
           if [[ "$FILE_PATH" = /* ]]; then
-            # Local mode: throttled copy
             TOTAL_SIZE=$(stat -c%s "$FILE_PATH")
             THROTTLE_BPS=$(( TOTAL_SIZE / 15 ))
             [ "$THROTTLE_BPS" -lt 1048576 ] && THROTTLE_BPS=1048576
@@ -131,7 +131,6 @@ jobs:
               exit 1
             fi
           else
-            # Remote mode: curl download
             FILE_URL="${BASE_URL}/file/bot${BOT_TOKEN}/${FILE_PATH}"
             curl -# -L -o "$OUTPUT" "$FILE_URL" 2>/tmp/download_progress.txt &
             CURL_PID=$!
@@ -242,14 +241,24 @@ jobs:
             exit 1
           fi
 
+      - name: Generate thumbnail
+        run: |
+          ffmpeg -y -i "compress/${COMPRESSED_NAME}" \
+            -ss 00:00:01 \
+            -vframes 1 \
+            -vf "scale=320:-1" \
+            compress/thumb.jpg
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: compressed-${{ github.event.inputs.chat_id }}-${{ github.run_id }}
-          path: compress/${{ env.COMPRESSED_NAME }}
+          path: |
+            compress/${{ env.COMPRESSED_NAME }}
+            compress/thumb.jpg
           retention-days: 7
 
-      - name: Send compressed file to group (reply, same bot, caption shows custom name)
+      - name: Send compressed file to group (reply, same bot, caption fixed, thumbnail)
         env:
           COMPRESSED_NAME: ${{ env.COMPRESSED_NAME }}
           COMPRESS_START: ${{ env.COMPRESS_START }}
@@ -267,15 +276,13 @@ jobs:
           MINS=$(( ELAPSED / 60 ))
           SECS=$(( ELAPSED % 60 ))
 
-          # ✅ Caption now includes the custom name
+          # ✅ Only custom name, no original caption
           CAPTION="${COMPRESSED_NAME} | Quality: ${QUALITY}p | Time: ${MINS}m ${SECS}s"
-          if [ -n "${ORIGINAL_CAPTION}" ]; then
-            CAPTION="${ORIGINAL_CAPTION} - ${CAPTION}"
-          fi
 
           curl -s -X POST "${BASE_URL}/bot${BOT_TOKEN}/sendVideo" \
             -F "chat_id=$CHAT_ID" \
             -F "video=@$FILE" \
+            -F "thumbnail=@compress/thumb.jpg" \
             -F "duration=$DURATION" \
             -F "supports_streaming=true" \
             -F "caption=$CAPTION" \
