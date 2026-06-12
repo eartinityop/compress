@@ -46,7 +46,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ffmpeg jq bc python3-pip pv
 
       - name: Create working directory
-        run: mkdir -p /tmp/telegram-bot-api compress
+        run: mkdir -p /tmp/telegram-bot-api compress && echo "FILE_ID=${{ github.event.inputs.file_id }}"
 
       - name: Download and start local Bot API server
         run: |
