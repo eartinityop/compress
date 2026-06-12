@@ -75,7 +75,22 @@ jobs:
         id: download
         run: |
           BASE_URL="http://127.0.0.1:8081"
-          FILE_PATH=$(curl -s "${BASE_URL}/bot${BOT_TOKEN}/getFile?file_id=${{ github.event.inputs.file_id }}" | jq -r '.result.file_path')
+          GETFILE_RESPONSE=$(curl -s "${BASE_URL}/bot${BOT_TOKEN}/getFile?file_id=${{ github.event.inputs.file_id }}")
+
+          echo "$GETFILE_RESPONSE"
+
+          FILE_PATH=$(echo "$GETFILE_RESPONSE" | jq -r '.result.file_path // empty')
+
+          if [ -z "$FILE_PATH" ]; then
+            ERROR=$(echo "$GETFILE_RESPONSE" | jq -r '.description // "Unknown error"')
+
+            curl -s -X POST "${BASE_URL}/bot${BOT_TOKEN}/editMessageText" \
+              -d "chat_id=$CHAT_ID" \
+              -d "message_id=$PROGRESS_MSG_ID" \
+              -d "text=❌ getFile failed: $ERROR"
+
+            exit 1
+          fi
           if [ -z "$FILE_PATH" ] || [ "$FILE_PATH" = "null" ]; then
             curl -s -X POST "${BASE_URL}/bot${BOT_TOKEN}/editMessageText" \
               -d "chat_id=$CHAT_ID" -d "message_id=$PROGRESS_MSG_ID" \
